@@ -7,3 +7,6 @@ coverage
 *.tsbuildinfo
 .DS_Store
 .vercel
+.typecheck/
+.verify-js/
+.verify-recovery/

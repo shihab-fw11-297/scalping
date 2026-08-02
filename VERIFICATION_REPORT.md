@@ -116,3 +116,15 @@ Completed in this environment:
 Machine-readable results are stored in `RESPONSIVE_VIEWPORT_AUDIT.json`.
 
 The dependency-backed Next.js build remains a target-machine gate because the configured npm registry returned 404 for `@types/node`.
+
+## Serverless report and timeframe correction
+
+- Complete reports are now generated inside the original analyze response.
+- The client no longer requires a second process-memory report lookup.
+- Ten cache-dependent API routes accept a validated recovery descriptor.
+- Window requests automatically rebuild from Finage after a Vercel cache miss.
+- Exact timeframe/offset/limit windows are cached in the browser tab.
+- Out-of-order timeframe responses are suppressed.
+- Recovery status is exposed in the response and UI.
+- Injected cache-miss recovery verification passed.
+- The previous immediate expired-analysis message is absent from application routes.

@@ -997,6 +997,8 @@ export function forEachMultiTimeframeState(
 export function summarizeMultiTimeframeStates(
   index: MultiTimeframeStateIndex,
   strongestLimit: number = MULTI_TIMEFRAME_STATE_CONFIG.strongestEventLimit,
+  fromTimestampMs = Number.NEGATIVE_INFINITY,
+  toTimestampMs = Number.POSITIVE_INFINITY,
 ): { summary: MultiTimeframeStateSummary; latest: MultiTimeframeStateSnapshot | null } {
   const directionCounts = createCountRecord(DIRECTIONS);
   const alignmentCounts = createCountRecord(ALIGNMENTS);
@@ -1007,6 +1009,7 @@ export function summarizeMultiTimeframeStates(
   let latest: MultiTimeframeStateSnapshot | null = null;
 
   forEachMultiTimeframeState(index, (snapshot) => {
+    if (snapshot.timestampMs < fromTimestampMs || snapshot.timestampMs >= toTimestampMs) return;
     latest = snapshot;
     sampleCount += 1;
     evidenceTotal += snapshot.composite.evidenceScore;

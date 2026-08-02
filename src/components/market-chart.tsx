@@ -20,62 +20,86 @@ import type { ChartSignalMarker, CompactCandle, TradePlanSnapshot } from "@/lib/
 interface MarketChartProps {
   candles: readonly CompactCandle[];
   signalMarkers?: readonly ChartSignalMarker[];
+  researchSignalMarkers?: readonly ChartSignalMarker[];
   tradePlan?: TradePlanSnapshot | null;
-  showConfirmedSignals?: boolean;
-  showContinuationSignals?: boolean;
+  showGradeA?: boolean;
+  showGradeB?: boolean;
+  showResearchSignals?: boolean;
   showInvalidations?: boolean;
   showTradeLevels?: boolean;
 }
 
 function toChartData(candles: readonly CompactCandle[]): CandlestickData[] {
-  const result = new Array<CandlestickData>(candles.length);
-  for (let index = 0; index < candles.length; index += 1) {
-    const [timestampMs, open, high, low, close] = candles[index];
-    result[index] = {
-      time: Math.floor(timestampMs / 1000) as UTCTimestamp,
-      open,
-      high,
-      low,
-      close,
-    };
-  }
-  return result;
+  return candles.map(([timestampMs, open, high, low, close]) => ({
+    time: Math.floor(timestampMs / 1000) as UTCTimestamp,
+    open,
+    high,
+    low,
+    close,
+  }));
+}
+
+function markerToSeries(
+  marker: ChartSignalMarker,
+  research: boolean,
+): SeriesMarker<UTCTimestamp> {
+  const isBuy = marker.action === "BUY";
+  const isInvalidation = marker.lifecycle === "INVALIDATED";
+  return {
+    time: Math.floor(marker.timestampMs / 1000) as UTCTimestamp,
+    position: isInvalidation ? "inBar" : isBuy ? "belowBar" : "aboveBar",
+    shape: research
+      ? isInvalidation
+        ? "circle"
+        : "square"
+      : isBuy
+        ? "arrowUp"
+        : "arrowDown",
+    color: research
+      ? isInvalidation
+        ? "#a3a3a3"
+        : "#94a3b8"
+      : isBuy
+        ? "#22c55e"
+        : "#ef4444",
+    text: marker.label,
+    size: research ? 0.65 : marker.grade === "A" ? 1.2 : 1,
+  };
 }
 
 function toSeriesMarkers(
-  markers: readonly ChartSignalMarker[],
+  tradeMarkers: readonly ChartSignalMarker[],
+  researchMarkers: readonly ChartSignalMarker[],
   options: {
-    showConfirmedSignals: boolean;
-    showContinuationSignals: boolean;
+    showGradeA: boolean;
+    showGradeB: boolean;
+    showResearchSignals: boolean;
     showInvalidations: boolean;
   },
 ): SeriesMarker<UTCTimestamp>[] {
   const visible: SeriesMarker<UTCTimestamp>[] = [];
-  for (const marker of markers) {
-    if (marker.lifecycle === "CONFIRMED" && !options.showConfirmedSignals) continue;
-    if (marker.lifecycle === "CONTINUATION" && !options.showContinuationSignals) continue;
-    if (marker.lifecycle === "INVALIDATED" && !options.showInvalidations) continue;
-
-    const isBuy = marker.action === "BUY";
-    const isInvalidation = marker.lifecycle === "INVALIDATED";
-    visible.push({
-      time: Math.floor(marker.timestampMs / 1000) as UTCTimestamp,
-      position: isInvalidation ? "inBar" : isBuy ? "belowBar" : "aboveBar",
-      shape: isInvalidation ? "circle" : isBuy ? "arrowUp" : "arrowDown",
-      color: isInvalidation ? "#facc15" : isBuy ? "#22c55e" : "#ef4444",
-      text: marker.label,
-      size: isInvalidation ? 0.7 : marker.lifecycle === "CONTINUATION" ? 0.8 : 1,
-    });
+  for (const marker of tradeMarkers) {
+    if (marker.grade === "A" && !options.showGradeA) continue;
+    if (marker.grade === "B" && !options.showGradeB) continue;
+    visible.push(markerToSeries(marker, false));
   }
-  return visible;
+  if (options.showResearchSignals) {
+    for (const marker of researchMarkers) {
+      if (marker.lifecycle === "INVALIDATED" && !options.showInvalidations) continue;
+      visible.push(markerToSeries(marker, true));
+    }
+  }
+  return visible.sort((left, right) => Number(left.time) - Number(right.time));
 }
 
 export function MarketChart({
   candles,
   signalMarkers = [],
+  researchSignalMarkers = [],
   tradePlan = null,
-  showConfirmedSignals = true,
-  showContinuationSignals = true,
+  showGradeA = true,
+  showGradeB = true,
+  showResearchSignals = false,
   showInvalidations = false,
   showTradeLevels = true,
 }: MarketChartProps) {
@@ -106,9 +130,7 @@ export function MarketChart({
         timeVisible: true,
         secondsVisible: false,
       },
-      localization: {
-        locale: "en-IN",
-      },
+      localization: { locale: "en-IN" },
     });
 
     const series = chart.addSeries(CandlestickSeries, {
@@ -117,11 +139,7 @@ export function MarketChart({
       wickUpColor: "#22c55e",
       wickDownColor: "#ef4444",
       borderVisible: false,
-      priceFormat: {
-        type: "price",
-        precision: 2,
-        minMove: 0.01,
-      },
+      priceFormat: { type: "price", precision: 2, minMove: 0.01 },
     });
 
     chartRef.current = chart;
@@ -150,13 +168,14 @@ export function MarketChart({
 
   useEffect(() => {
     markerPrimitiveRef.current?.setMarkers(
-      toSeriesMarkers(signalMarkers, {
-        showConfirmedSignals,
-        showContinuationSignals,
+      toSeriesMarkers(signalMarkers, researchSignalMarkers, {
+        showGradeA,
+        showGradeB,
+        showResearchSignals,
         showInvalidations,
       }),
     );
-  }, [signalMarkers, showConfirmedSignals, showContinuationSignals, showInvalidations]);
+  }, [signalMarkers, researchSignalMarkers, showGradeA, showGradeB, showResearchSignals, showInvalidations]);
 
   useEffect(() => {
     const series = seriesRef.current;
@@ -206,5 +225,5 @@ export function MarketChart({
     };
   }, [tradePlan, showTradeLevels]);
 
-  return <div ref={containerRef} className="chart" aria-label="XAUUSD candlestick chart with optional signal markers" />;
+  return <div ref={containerRef} className="chart" aria-label="XAUUSD candlestick chart with medium-accuracy A/B trade markers" />;
 }

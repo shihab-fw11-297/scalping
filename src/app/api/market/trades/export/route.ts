@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { analysisCache } from "@/lib/market/analysis-cache";
+import { resolveAnalysis } from "@/lib/market/analysis-recovery";
+import { ANALYSIS_RECOVERY_QUERY_SHAPE } from "@/lib/market/analysis-recovery-schema";
 import {
   createTradePlanHistory,
   getOrCreateTradeManagementIndex,
@@ -8,10 +9,12 @@ import type { TradePlanHistoryItem } from "@/lib/market/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const querySchema = z.object({
   analysisId: z.string().uuid(),
   format: z.enum(["csv", "json"]).default("csv"),
+  ...ANALYSIS_RECOVERY_QUERY_SHAPE,
 });
 
 const encoder = new TextEncoder();
@@ -57,6 +60,11 @@ function* csvChunks(
     "finalStatus",
     "finalHealth",
     "candidateScore",
+    "qualityScore",
+    "qualityGrade",
+    "tradeReady",
+    "session",
+    "marketEpisodeId",
     "entryZoneLow",
     "preferredEntry",
     "entryZoneHigh",
@@ -69,6 +77,13 @@ function* csvChunks(
     "totalRiskWithCosts",
     "nearestObstacle",
     "nearestObstacleSource",
+    "nearestObstacleClass",
+    "decisionObstacle",
+    "decisionObstacleSource",
+    "decisionObstacleClass",
+    "softObstacleCount",
+    "mediumObstacleCount",
+    "hardObstacleCount",
     "targetLimitingFactor",
     "availableDistance",
     "availableRiskReward",
@@ -106,6 +121,11 @@ function* csvChunks(
         item.status,
         item.finalHealth,
         item.candidateScore,
+        item.quality.score,
+        item.quality.grade,
+        item.quality.tradeReady,
+        item.quality.session,
+        item.marketEpisodeId,
         item.entryZone.lower,
         item.entryZone.preferred,
         item.entryZone.upper,
@@ -118,6 +138,13 @@ function* csvChunks(
         item.structuralRisk.totalRiskWithCosts,
         item.targetSpace.nearestObstaclePrice,
         item.targetSpace.nearestObstacleSource,
+        item.targetSpace.nearestObstacleClass,
+        item.targetSpace.decisionObstaclePrice,
+        item.targetSpace.decisionObstacleSource,
+        item.targetSpace.decisionObstacleClass,
+        item.targetSpace.softObstacleCount,
+        item.targetSpace.mediumObstacleCount,
+        item.targetSpace.hardObstacleCount,
         item.targetSpace.limitingFactor,
         item.targetSpace.availableDistance,
         item.targetSpace.availableRiskReward,
@@ -173,13 +200,14 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "Invalid trade-plan export request." }, { status: 400 });
   }
 
-  const analysis = analysisCache.get(parsed.data.analysisId);
-  if (!analysis) {
+  const resolved = await resolveAnalysis(parsed.data);
+  if (!resolved) {
     return Response.json(
-      { error: "Analysis expired or was not found. Run the analysis again." },
+      { error: "Analysis was not found and no recovery parameters were supplied." },
       { status: 410 },
     );
   }
+  const analysis = resolved.analysis;
 
   const index = getOrCreateTradeManagementIndex(analysis.datasets, {
     dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
@@ -195,6 +223,7 @@ export async function GET(request: Request): Promise<Response> {
         "Content-Type": isJson ? "application/json; charset=utf-8" : "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${baseName}.${isJson ? "json" : "csv"}"`,
         "Cache-Control": "no-store",
+        "X-Analysis-Recovered": resolved.recovered ? "true" : "false",
       },
     },
   );

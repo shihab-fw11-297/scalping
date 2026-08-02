@@ -1,0 +1,36 @@
+{
+  "verifiedAtUtc": "2026-08-02T06:45:00Z",
+  "sourceCompileWithDependencyShims": "passed",
+  "serverlessRouteAudit": {
+    "status": "passed",
+    "recoveryRoutes": 10,
+    "embeddedCompleteReport": true,
+    "browserWindowCache": true,
+    "staleResponseProtection": true,
+    "recoveryStatusVisible": true
+  },
+  "injectedRecoveryTest": {
+    "status": "passed",
+    "rebuildCalls": 1,
+    "missingRecoveryReturnsNull": true
+  },
+  "reportAndMarkerRegression": {
+    "status": "passed",
+    "syntheticM1Candles": 40000,
+    "signalEvents": 446,
+    "tradePlans": 133,
+    "m1WindowMarkers": 36,
+    "m5WindowMarkers": 36,
+    "reportSizeMb": 0.48
+  },
+  "responsiveRegression": {
+    "status": "passed",
+    "recordedViewports": 8,
+    "rootHorizontalOverflow": 0,
+    "minimumTouchHeightPx": 44
+  },
+  "limitations": [
+    "Real Finage recovery requires a valid FINAGE_API_KEY and plan access.",
+    "A dependency-backed Next.js build could not be rerun in this container because its internal npm registry did not provide @types/node and public registry access timed out."
+  ]
+}

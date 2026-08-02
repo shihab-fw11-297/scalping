@@ -15,7 +15,11 @@ import {
   createSignalMarkersForWindow,
   getOrCreateSignalDecisionIndex,
 } from "./signal-decision";
-import { analyzeTradeManagementAt, getOrCreateTradeManagementIndex } from "./trade-management";
+import {
+  analyzeTradeManagementAt,
+  createTradeReadyMarkersForWindow,
+  getOrCreateTradeManagementIndex,
+} from "./trade-management";
 import type {
   CachedAnalysis,
   CandleBehaviourView,
@@ -43,13 +47,20 @@ export function createMarketWindow(
   maximumLimit = 5_000,
 ): MarketWindowResponse {
   const dataset = analysis.datasets[timeframe];
-  const total = dataset.candles.length;
+  const visibleRange = analysis.visibleRanges?.[timeframe] ?? {
+    start: 0,
+    end: dataset.candles.length,
+    total: dataset.candles.length,
+  };
+  const total = visibleRange.total;
   const limit = Math.max(1, Math.min(maximumLimit, Math.floor(requestedLimit)));
   const maximumOffset = Math.max(0, total - limit);
   const offset = Math.max(0, Math.min(maximumOffset, Math.floor(requestedOffset)));
   const end = Math.min(total, offset + limit);
-  const detailed = analyzeCandleBehaviourWindow(dataset.candles, offset, end - offset);
-  const priceDetailed = analyzePriceBehaviourWindow(dataset.candles, offset, end - offset);
+  const absoluteOffset = visibleRange.start + offset;
+  const absoluteEnd = visibleRange.start + end;
+  const detailed = analyzeCandleBehaviourWindow(dataset.candles, absoluteOffset, absoluteEnd - absoluteOffset);
+  const priceDetailed = analyzePriceBehaviourWindow(dataset.candles, absoluteOffset, absoluteEnd - absoluteOffset);
 
   const behaviours: CandleBehaviourView[] = detailed.map((item) => ({
     timestampMs: item.timestampMs,
@@ -87,7 +98,7 @@ export function createMarketWindow(
     lateEntryRisk: item.lateEntryRisk,
   }));
 
-  const lastCandle = dataset.candles[end - 1];
+  const lastCandle = dataset.candles[absoluteEnd - 1];
   const marketStateAtWindowEnd = lastCandle
     ? analyzeMultiTimeframeStateAt(
         getOrCreateMultiTimeframeStateIndex(analysis.datasets, {
@@ -107,12 +118,12 @@ export function createMarketWindow(
   const signalIndex = getOrCreateSignalDecisionIndex(analysis.datasets, {
     dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
   });
-  const signalMarkers = createSignalMarkersForWindow(
+  const researchSignalMarkers = createSignalMarkersForWindow(
     signalIndex,
     timeframe,
     dataset.candles,
-    offset,
-    end,
+    absoluteOffset,
+    absoluteEnd,
     analysis.meta.dailyBoundaryMode,
   );
   const signalDecisionAtWindowEnd = lastCandle
@@ -121,27 +132,38 @@ export function createMarketWindow(
         windowAnchorTimestamp(timeframe, lastCandle[0], analysis.meta.dailyBoundaryMode),
       )
     : null;
+  const tradeIndex = getOrCreateTradeManagementIndex(analysis.datasets, {
+    dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
+    settings: analysis.meta.tradeManagementSettings,
+  });
+  const signalMarkers = createTradeReadyMarkersForWindow(
+    tradeIndex,
+    timeframe,
+    dataset.candles,
+    absoluteOffset,
+    absoluteEnd,
+    analysis.meta.dailyBoundaryMode,
+  );
   const tradePlanAtWindowEnd = lastCandle
     ? analyzeTradeManagementAt(
-        getOrCreateTradeManagementIndex(analysis.datasets, {
-          dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
-          settings: analysis.meta.tradeManagementSettings,
-        }),
+        tradeIndex,
         windowAnchorTimestamp(timeframe, lastCandle[0], analysis.meta.dailyBoundaryMode),
       )
     : null;
 
   return {
     analysisId: analysis.id,
+    recoveredFromSource: false,
     timeframe,
     offset,
     limit,
     total,
-    candles: dataset.candles.slice(offset, end),
-    completeness: dataset.completeness.slice(offset, end),
+    candles: dataset.candles.slice(absoluteOffset, absoluteEnd),
+    completeness: dataset.completeness.slice(absoluteOffset, absoluteEnd),
     behaviours,
     priceBehaviours,
     signalMarkers,
+    researchSignalMarkers,
     marketStateAtWindowEnd,
     hypothesisOpportunityAtWindowEnd,
     signalDecisionAtWindowEnd,

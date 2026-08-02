@@ -13,6 +13,10 @@ This release intentionally has:
 
 The app fetches historical M1 candles on demand, validates and aggregates them, keeps the full dataset only in an expiring server-memory cache, and sends selected chart windows to the browser. Phase 2 measures individual candle structure. Phase 3 measures how price travels across candles. Phase 4 synchronizes 1D, rolling 5H, 1H, 15M, 5M and 1M responsibilities. Phase 5 ranks bullish, bearish and range hypotheses and evaluates four opportunity families. Phase 6 converts qualified opportunities into a closed-candle decision lifecycle. Phase 7 then creates or rejects an analytical entry, stop and target plan using structural risk, historical target space, configured execution-cost assumptions, no-chase and expiry controls. Live broker execution remains unavailable.
 
+## Medium Accuracy V1
+
+This release uses automatic warm-up context, removes closed-market/stale provider candles, classifies obstacles by structural importance, grades trade-ready plans as A/B/C, merges duplicate market episodes, and shows only deduplicated A/B BUY/SELL markers by default. Pattern-level Phase 6 events remain available as optional research markers. See `MEDIUM_ACCURACY_UPGRADE.md`.
+
 ## Architecture
 
 ```text
@@ -63,11 +67,18 @@ Browser
        └─ streamed timeframe candle CSV or JSON
 ```
 
-## Deployment constraint
+## Deployment model
 
-The analysis cache lives in process memory. Run this version as one long-running Next.js Node process on a VPS, Docker host, Railway service, Render web service, or similar single-instance environment.
+The in-process LRU remains the fastest path on a long-running Node server. On Vercel or another stateless platform, a later request may reach a different function instance. This release no longer treats that cache miss as an expired analysis:
 
-Do not deploy this exact cache architecture across multiple stateless instances unless sticky routing or an external shared cache is added.
+- the complete report is embedded in the original `/api/market/analyze` response
+- report downloads run from the report already held in the browser
+- window, export, state, opportunity, signal and trade routes receive a validated recovery descriptor
+- a cache miss automatically rebuilds the same historical analysis from Finage
+- loaded timeframe windows are cached in the current browser tab
+- stale/out-of-order timeframe responses are ignored
+
+An external Redis/KV cache is still useful to avoid repeated Finage calls, but it is no longer required for correctness.
 
 ## Phase 1 — Market data foundation
 
@@ -403,13 +414,26 @@ These belong to later phases:
 
 ## Automatic complete reports
 
-Every successful fetch immediately returns a report summary and then automatically loads the complete report from:
+Every successful fetch builds the complete report inside the original analysis request. The client does not depend on a second cache-only `/report` invocation, so Vercel instance changes cannot produce the former `Analysis expired or was not found` error immediately after a successful analysis.
 
-```text
-GET /api/market/report?analysisId=<uuid>&format=json|md
+The complete JSON contains all signal events, all Phase 7 plans, MFE/MAE, rejection reasons, family breakdown, quality data and engine settings. JSON and readable Markdown downloads are generated from the report already held in the browser. The browser keeps the latest six reports in current-tab memory and can download them as one comparison bundle. Refreshing the tab clears this temporary collection.
+
+`GET /api/market/report` remains available for API clients and can automatically rebuild from Finage when validated recovery parameters are supplied.
+
+## Serverless timeframe switching
+
+Timeframe and range requests include the original date range plus the exact spread, slippage and risk settings. When the Vercel process-memory cache is unavailable, the server rebuilds the same analysis and returns the requested M1/M5/M15/H1/D1 window. The response exposes whether a rebuild occurred, and the browser caches each loaded window so switching back is immediate.
+
+The first uncached timeframe on a new serverless instance can take longer because it may call Finage again. Configure a shared Redis/KV store later if avoiding repeated provider calls becomes important.
+
+Verification commands:
+
+```bash
+npm run verify:serverless
+npm run verify:analysis-recovery
 ```
 
-The complete JSON contains all signal events, all Phase 7 plans, MFE/MAE, rejection reasons, family breakdown, quality data and engine settings. The browser keeps the latest six reports in current-tab memory and can download them as one comparison bundle. Refreshing the tab clears this temporary collection.
+See `SERVERLESS_RUNTIME_FIX.md`.
 
 ## Historical signal markers
 

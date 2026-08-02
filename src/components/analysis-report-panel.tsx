@@ -3,12 +3,11 @@
 import type { AnalysisReport, AnalysisReportSummary } from "@/lib/market/types";
 
 interface AnalysisReportPanelProps {
-  analysisId: string;
   summary: AnalysisReportSummary;
   currentReport: AnalysisReport | null;
   collectedReports: readonly AnalysisReport[];
-  reportLoading: boolean;
   onDownloadBundle: () => void;
+  onDownloadCurrentReport: (format: "json" | "md") => void;
   onClearReports: () => void;
 }
 
@@ -19,18 +18,13 @@ function formatPeriod(fromUtc: string, toUtc: string): string {
 }
 
 export function AnalysisReportPanel({
-  analysisId,
   summary,
   currentReport,
   collectedReports,
-  reportLoading,
   onDownloadBundle,
+  onDownloadCurrentReport,
   onClearReports,
 }: AnalysisReportPanelProps) {
-  const reportParams = new URLSearchParams({ analysisId });
-  const jsonUrl = `/api/market/report?${reportParams.toString()}&format=json`;
-  const markdownUrl = `/api/market/report?${reportParams.toString()}&format=md`;
-
   return (
     <section className="panel report-panel">
       <div className="panel-heading">
@@ -39,17 +33,17 @@ export function AnalysisReportPanel({
           <h2>Fetch report ready for comparison</h2>
         </div>
         <span className="status-pill">
-          {reportLoading ? "Building full report…" : `Collected ${collectedReports.length}/6`}
+          {currentReport ? `Report ready · collected ${collectedReports.length}/6` : "Report unavailable"}
         </span>
       </div>
 
       <div className="metric-grid report-metrics">
-        <div className="metric"><span>Confirmed signals</span><strong>{summary.signalOverview.confirmed}</strong></div>
-        <div className="metric"><span>Continuation signals</span><strong>{summary.signalOverview.continuations}</strong></div>
-        <div className="metric"><span>Qualified plans</span><strong>{summary.tradeOverview.qualified}</strong></div>
+        <div className="metric"><span>Trade-ready A/B</span><strong>{summary.tradeOverview.tradeReadySignals}</strong></div>
+        <div className="metric"><span>Grade A / B</span><strong>{summary.tradeOverview.gradeA} / {summary.tradeOverview.gradeB}</strong></div>
+        <div className="metric"><span>Pattern confirms</span><strong>{summary.signalOverview.confirmed + summary.signalOverview.continuations}</strong></div>
+        <div className="metric"><span>Duplicate episodes hidden</span><strong>{summary.tradeOverview.duplicateEpisodesSuppressed}</strong></div>
+        <div className="metric"><span>Average quality</span><strong>{summary.tradeOverview.averageQualityScore}</strong></div>
         <div className="metric"><span>Entries observed</span><strong>{summary.tradeOverview.entered}</strong></div>
-        <div className="metric"><span>Qualification rate</span><strong>{summary.observedRates.qualificationRatePercent}%</strong></div>
-        <div className="metric"><span>Entry fill rate</span><strong>{summary.observedRates.entryFillRatePercent}%</strong></div>
         <div className="metric"><span>TP1 progress rate</span><strong>{summary.observedRates.tp1ProgressRatePercent}%</strong></div>
         <div className="metric"><span>Intrabar ambiguity</span><strong>{summary.observedRates.intrabarAmbiguityRatePercent}%</strong></div>
       </div>
@@ -59,11 +53,25 @@ export function AnalysisReportPanel({
           <span>Current fetch</span>
           <strong>{formatPeriod(summary.requestedFromUtc, summary.requestedToUtc)}</strong>
           <small>
-            {summary.dataQuality.validM1Candles.toLocaleString()} M1 candles · {summary.processingMs.toLocaleString()} ms processing
+            {summary.dataQuality.validM1Candles.toLocaleString()} visible M1 · {summary.dataQuality.warmupM1Candles.toLocaleString()} warm-up · {summary.processingMs.toLocaleString()} ms
           </small>
           <div className="actions report-download-actions">
-            <a className="button-link" href={jsonUrl}>Download full report JSON</a>
-            <a className="button-link" href={markdownUrl}>Download readable report</a>
+            <button
+              type="button"
+              className="button-link"
+              disabled={!currentReport}
+              onClick={() => onDownloadCurrentReport("json")}
+            >
+              Download full report JSON
+            </button>
+            <button
+              type="button"
+              className="button-link"
+              disabled={!currentReport}
+              onClick={() => onDownloadCurrentReport("md")}
+            >
+              Download readable report
+            </button>
           </div>
           <small>
             JSON contains every signal event, every Phase 7 plan, engine settings, MFE/MAE, rejection reasons and family breakdown.
@@ -108,7 +116,7 @@ export function AnalysisReportPanel({
           <button
             type="button"
             className="secondary"
-            disabled={collectedReports.length === 0 || reportLoading}
+            disabled={collectedReports.length === 0}
             onClick={onDownloadBundle}
           >
             Download {collectedReports.length}-report bundle
@@ -132,7 +140,7 @@ export function AnalysisReportPanel({
               <div>
                 <strong>{formatPeriod(report.summary.requestedFromUtc, report.summary.requestedToUtc)}</strong>
                 <span>
-                  Signals {report.summary.signalOverview.confirmed + report.summary.signalOverview.continuations} · Plans {report.summary.tradeOverview.created} · Entries {report.summary.tradeOverview.entered} · TP1 {report.summary.tradeOverview.tp1Hit}
+                  A/B {report.summary.tradeOverview.tradeReadySignals} · A {report.summary.tradeOverview.gradeA} · B {report.summary.tradeOverview.gradeB} · Entries {report.summary.tradeOverview.entered} · TP1 {report.summary.tradeOverview.tp1Hit}
                 </span>
               </div>
               <small>{report.analysisId.slice(0, 8)}</small>

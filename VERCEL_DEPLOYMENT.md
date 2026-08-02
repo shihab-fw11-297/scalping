@@ -2,12 +2,25 @@
 
 ## Included build fixes
 
-- Build-critical TypeScript packages are in `dependencies`, so they remain available even if an environment accidentally installs production dependencies only.
+- Build-critical TypeScript packages are in `dependencies`, so they remain available even if an environment installs production dependencies only.
 - `vercel.json` forces `npm install --production=false` and `npm run build`.
-- Node.js is pinned to the Vercel-supported major version `22.x`.
+- Node.js is pinned to `22.x`.
 - `next.config.mjs` avoids requiring TypeScript to load the Next.js configuration.
-- `tsconfig.build.json` limits production type checking to application source and generated Next.js route types. Tests and verification scripts remain covered by the normal `tsconfig.json` during local `npm run typecheck` and `npm test`.
-- `prebuild` validates that the required build packages and deployment files exist before `next build` starts.
+- `tsconfig.build.json` limits production type checking to application source and generated Next.js route types.
+- `prebuild` validates required build packages and deployment files before `next build` starts.
+
+## Included serverless runtime fixes
+
+Vercel Functions do not guarantee that `/analyze`, `/report`, `/window` and export requests use the same process. The project therefore no longer depends on process memory for correctness:
+
+1. `/api/market/analyze` returns the complete report in the same response.
+2. The browser downloads JSON/Markdown from that embedded report.
+3. The analyze response includes a validated recovery descriptor containing the original period and Phase 7 assumptions.
+4. Window, report, export, market-state, opportunity, signal and trade routes use the in-memory cache when available.
+5. On a cache miss, those routes can rebuild the same analysis from Finage.
+6. The browser caches successfully loaded timeframe windows and rejects stale responses.
+
+A shared Redis/KV layer remains optional for reducing repeated Finage calls. It is not required to prevent the former immediate `Analysis expired or was not found` failure.
 
 ## Vercel settings
 
@@ -19,18 +32,25 @@ Use the folder containing `package.json` as the Vercel Root Directory.
 - Build command: `npm run build`
 - Output directory: leave blank/default
 
-Do not add `NODE_ENV=production` manually in Vercel environment variables. Add `FINAGE_API_KEY` and the other required server variables from `.env.example` instead.
+Do not add `NODE_ENV=production` manually. Add `FINAGE_API_KEY` and the other required server variables from `.env.example`.
 
-After updating the repository, redeploy without the previous build cache.
+After replacing the project files, redeploy without the previous build cache.
 
 ## Local verification
 
 ```bash
 npm install --production=false
 npm run verify:vercel
+npm run verify:serverless
+npm run verify:analysis-recovery
+npm run verify:report-signals
 npm run build
 ```
 
-## Runtime architecture note
+## Runtime behaviour
 
-The current analysis cache is process memory. Vercel Functions may recycle or distribute function instances, so cached analysis IDs are not durable across every request. Initial analysis data is returned in the analyze response, but reliable cross-request report/window history on a serverless multi-instance deployment requires an external shared cache or a single long-running Node deployment.
+- The initial complete report is available immediately after a successful fetch.
+- The first timeframe request that lands on a different Vercel instance may rebuild from Finage and therefore take longer.
+- The UI displays whether the loaded window was rebuilt.
+- Returning to an already loaded timeframe/window uses current-tab browser cache.
+- A Finage recovery failure is returned as a specific JSON error instead of a misleading expired-analysis message.

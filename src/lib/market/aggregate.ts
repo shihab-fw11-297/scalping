@@ -29,6 +29,7 @@ interface MutableBucket {
   close: number;
   volume: number;
   actualChildren: number;
+  incompleteSourceChildren: number;
 }
 
 export interface AggregationOptions {
@@ -36,6 +37,7 @@ export interface AggregationOptions {
   requestToMs: number;
   weekendSchedule: WeekendSchedule;
   dailyBoundaryMode: DailyBoundaryMode;
+  m1Completeness?: readonly CandleCompleteness[];
 }
 
 interface MinuteCoverageIndex {
@@ -111,7 +113,8 @@ function calculateCoverage(
   const boundaryPartial =
     effectiveStart > bucket.bucketStart || effectiveEnd < bucket.bucketEnd;
   const hasClosure = expectedClosedChildren > 0;
-  const missing = bucket.actualChildren < expectedChildren;
+  const effectiveActualChildren = Math.max(0, bucket.actualChildren - bucket.incompleteSourceChildren);
+  const missing = effectiveActualChildren < expectedChildren;
   const overfull = bucket.actualChildren > expectedChildren;
 
   let status: CandleCoverageStatus;
@@ -124,11 +127,11 @@ function calculateCoverage(
   else status = "COMPLETE";
 
   const completenessPercent = expectedChildren === 0
-    ? bucket.actualChildren === 0 ? 100 : 0
-    : Math.min(100, (bucket.actualChildren / expectedChildren) * 100);
+    ? effectiveActualChildren === 0 ? 100 : 0
+    : Math.min(100, (effectiveActualChildren / expectedChildren) * 100);
 
   return {
-    actualChildren: bucket.actualChildren,
+    actualChildren: effectiveActualChildren,
     expectedChildren,
     fullIntervalChildren,
     expectedClosedChildren,
@@ -175,6 +178,8 @@ export function aggregateAllTimeframes(
 
   for (let index = 0; index < m1Candles.length; index += 1) {
     const [timestamp, open, high, low, close, volume] = m1Candles[index];
+    const sourceIncomplete = options.m1Completeness?.[index]?.status !== undefined &&
+      !["COMPLETE", "EXPECTED_MARKET_CLOSURE", "PARTIAL_REQUEST_BOUNDARY", "BOUNDARY_AND_CLOSURE"].includes(options.m1Completeness[index].status);
 
     for (const timeframe of DERIVED_TIMEFRAMES) {
       const bounds = bucketBounds(timestamp, timeframe, options.dailyBoundaryMode);
@@ -195,6 +200,7 @@ export function aggregateAllTimeframes(
           close,
           volume,
           actualChildren: 1,
+          incompleteSourceChildren: sourceIncomplete ? 1 : 0,
         });
         continue;
       }
@@ -204,6 +210,7 @@ export function aggregateAllTimeframes(
       current.close = close;
       current.volume += volume;
       current.actualChildren += 1;
+      if (sourceIncomplete) current.incompleteSourceChildren += 1;
     }
   }
 

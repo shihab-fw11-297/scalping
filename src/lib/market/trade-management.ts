@@ -1,6 +1,10 @@
 import { FixedMinHeap } from "./fixed-min-heap";
 import { forEachPriceBehaviour } from "./price-behaviour";
 import {
+  analyzeMultiTimeframeStateAt,
+  getOrCreateMultiTimeframeStateIndex,
+} from "./multi-timeframe-state";
+import {
   SIGNAL_OPPORTUNITY_FAMILIES,
   getOrCreateSignalDecisionIndex,
   signalCandleIndexAtOrBefore,
@@ -8,8 +12,14 @@ import {
   type SignalDecisionIndex,
 } from "./signal-decision";
 import type { DailyBoundaryMode } from "./market-session";
+import { classifyXauTradingSession } from "./trading-session";
+import { TIMEFRAME_MS } from "./constants";
+import { getNextDailyBucketStart } from "./market-session";
 import type {
+  ChartSignalMarker,
   CompactCandle,
+  MultiTimeframeStateSnapshot,
+  ObstacleClass,
   EntryZone,
   ExpectedMovementPlan,
   ExecutionCostAssumption,
@@ -21,6 +31,9 @@ import type {
   SignalAction,
   StructuralRiskPlan,
   TargetLevelSource,
+  TradeQualityAssessment,
+  TradeQualityComponents,
+  TradeQualityGrade,
   TargetSpacePlan,
   Timeframe,
   TimeframeDataset,
@@ -55,6 +68,9 @@ export const TRADE_MANAGEMENT_CONFIG = Object.freeze({
   terminalDisplayBars: 60,
   strongestPlanLimit: 30,
   expectedMovementMaximumAverageRanges: 8,
+  mediumSignalMinimumScore: 68,
+  gradeAMinimumScore: 80,
+  marketEpisodeMergeMinutes: 12,
 });
 
 const STATUSES: readonly TradePlanStatus[] = [
@@ -94,6 +110,9 @@ const REJECTIONS: readonly TradePlanRejectionCode[] = [
   "STRUCTURE_INVALIDATED",
   "INTRABAR_SEQUENCE_UNKNOWN",
   "SUPERSEDED_BY_NEW_SIGNAL",
+  "QUALITY_BELOW_MEDIUM",
+  "TIMEFRAME_ROTATION_CONTEXT_ONLY",
+  "DUPLICATE_MARKET_EPISODE",
 ];
 const LIMITATIONS: readonly TradePlanLimitationCode[] = [
   "HISTORICAL_OHLC_ONLY",
@@ -141,6 +160,8 @@ interface PlanRecord {
   structuralRisk: StructuralRiskPlan;
   targetSpace: TargetSpacePlan;
   expectedMovement: ExpectedMovementPlan;
+  quality: TradeQualityAssessment;
+  marketEpisodeId: string;
   reasons: TradePlanReasonCode[];
   rejectionReasons: TradePlanRejectionCode[];
   limitations: TradePlanLimitationCode[];
@@ -160,6 +181,48 @@ interface PlanRecord {
 
 interface RuntimeTrack {
   planId: number;
+}
+
+interface TradeReadySelection {
+  selected: PlanRecord[];
+  suppressedCount: number;
+  conflictCount: number;
+}
+
+/**
+ * Collapses nearby strategy families into one executable market episode.
+ * Same-direction evidence keeps the highest-quality plan. Opposite directions
+ * require a clear quality advantage; otherwise the episode is suppressed.
+ */
+function selectTradeReadyPlans(plans: readonly PlanRecord[]): TradeReadySelection {
+  const ready = plans
+    .filter((plan) => plan.quality.tradeReady)
+    .sort((a, b) => a.signalTimestampMs - b.signalTimestampMs || b.quality.score - a.quality.score);
+  const selected: PlanRecord[] = [];
+  let suppressedCount = 0;
+  let conflictCount = 0;
+  const mergeMs = TRADE_MANAGEMENT_CONFIG.marketEpisodeMergeMinutes * MINUTE_MS;
+
+  for (let start = 0; start < ready.length;) {
+    let end = start + 1;
+    const episodeStart = ready[start].signalTimestampMs;
+    while (end < ready.length && ready[end].signalTimestampMs - episodeStart < mergeMs) end += 1;
+    const group = ready.slice(start, end);
+    const bullish = group.filter((plan) => plan.direction === "BULLISH").sort((a, b) => b.quality.score - a.quality.score)[0];
+    const bearish = group.filter((plan) => plan.direction === "BEARISH").sort((a, b) => b.quality.score - a.quality.score)[0];
+    let winner: PlanRecord | null = bullish ?? bearish ?? null;
+    if (bullish && bearish) {
+      const difference = Math.abs(bullish.quality.score - bearish.quality.score);
+      if (difference < 8) {
+        winner = null;
+        conflictCount += 1;
+      } else winner = bullish.quality.score > bearish.quality.score ? bullish : bearish;
+    }
+    if (winner) selected.push(winner);
+    suppressedCount += group.length - (winner ? 1 : 0);
+    start = end;
+  }
+  return { selected, suppressedCount, conflictCount };
 }
 
 interface TradeArrays {
@@ -298,6 +361,13 @@ function expectedMovement(feature: PriceBehaviour, averageRange20: number): Expe
 interface HistoricalObstacle {
   price: number;
   source: Exclude<TargetLevelSource, "R_MULTIPLE" | "EXPECTED_10M_CAPACITY" | "EXPANSION">;
+  obstacleClass: ObstacleClass;
+}
+
+function obstacleClassForSource(source: HistoricalObstacle["source"]): ObstacleClass {
+  if (source === "M1_SWING") return "SOFT";
+  if (source === "M5_SWING") return "MEDIUM";
+  return "HARD";
 }
 
 const FIXED_TIMEFRAME_MS: Record<Exclude<Timeframe, "D1">, number> = {
@@ -360,7 +430,7 @@ function collectSwingObstacle(
         value >= candles[index - 2][2] &&
         value > candles[index + 1][2] &&
         value >= candles[index + 2][2]
-      ) candidates.push({ price: value, source });
+      ) candidates.push({ price: value, source, obstacleClass: obstacleClassForSource(source) });
     } else {
       const value = candles[index][3];
       if (
@@ -369,7 +439,7 @@ function collectSwingObstacle(
         value <= candles[index - 2][3] &&
         value < candles[index + 1][3] &&
         value <= candles[index + 2][3]
-      ) candidates.push({ price: value, source });
+      ) candidates.push({ price: value, source, obstacleClass: obstacleClassForSource(source) });
     }
   }
 }
@@ -397,7 +467,7 @@ function collectRangeBoundary(
   if (
     Number.isFinite(boundary) &&
     (direction === "BULLISH" ? boundary > entry + minimumDistance : boundary < entry - minimumDistance)
-  ) candidates.push({ price: boundary, source });
+  ) candidates.push({ price: boundary, source, obstacleClass: obstacleClassForSource(source) });
 }
 
 function nearestHistoricalObstacle(
@@ -407,7 +477,12 @@ function nearestHistoricalObstacle(
   direction: Exclude<OpportunityDirection, "NEUTRAL">,
   entry: number,
   averageRange20: number,
-): { nearest: HistoricalObstacle | null; candidateCount: number } {
+): {
+  nearest: HistoricalObstacle | null;
+  decisionObstacle: HistoricalObstacle | null;
+  candidateCount: number;
+  classCounts: Record<ObstacleClass, number>;
+} {
   const minimumDistance = averageRange20 * 0.4;
   const candidates: HistoricalObstacle[] = [];
 
@@ -471,14 +546,24 @@ function nearestHistoricalObstacle(
 
   let nearest: HistoricalObstacle | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
+  let decisionObstacle: HistoricalObstacle | null = null;
+  let decisionDistance = Number.POSITIVE_INFINITY;
+  const classCounts: Record<ObstacleClass, number> = { SOFT: 0, MEDIUM: 0, HARD: 0 };
   for (const candidate of candidates) {
+    classCounts[candidate.obstacleClass] += 1;
     const distance = Math.abs(candidate.price - entry);
     if (distance < nearestDistance) {
       nearest = candidate;
       nearestDistance = distance;
     }
+    // Only structural M15/H1/range boundaries can veto an otherwise valid trade.
+    // M1 is internal noise and M5 is a management/confluence reference.
+    if (candidate.obstacleClass === "HARD" && distance < decisionDistance) {
+      decisionObstacle = candidate;
+      decisionDistance = distance;
+    }
   }
-  return { nearest, candidateCount: candidates.length };
+  return { nearest, decisionObstacle, candidateCount: candidates.length, classCounts };
 }
 
 function entryReference(
@@ -535,6 +620,162 @@ function familyNoChaseDistance(family: OpportunityFamily, averageRange20: number
   return Math.max(averageRange20 * factor, width * 2.5);
 }
 
+function clampComponent(value: number, maximum: number): number {
+  return stable(Math.max(0, Math.min(maximum, value)));
+}
+
+function locationSuitability(
+  family: OpportunityFamily,
+  direction: Exclude<OpportunityDirection, "NEUTRAL">,
+  state: MultiTimeframeStateSnapshot,
+): number {
+  const zone = state.hourly.zone;
+  const bullishEdge = zone === "RANGE_LOW" || zone === "LOWER_QUARTILE" || zone === "BELOW_RANGE";
+  const bearishEdge = zone === "RANGE_HIGH" || zone === "UPPER_QUARTILE" || zone === "ABOVE_RANGE";
+  const favourableEdge = direction === "BULLISH" ? bullishEdge : bearishEdge;
+  const wrongEdge = direction === "BULLISH" ? bearishEdge : bullishEdge;
+  if (family === "FAILED_BREAK_REVERSAL") return favourableEdge ? 10 : wrongEdge ? 1 : zone === "MID_RANGE" ? 2 : 5;
+  if (family === "IMPULSE_RELOAD" || family === "PRESSURE_RELEASE") {
+    if (state.hourly.condition === "WITH_TREND_PULLBACK") return 10;
+    if (favourableEdge) return 8;
+    if (state.hourly.condition === "WITH_TREND_EXTENDED" || wrongEdge) return 2;
+    return zone === "MID_RANGE" ? 5 : 6;
+  }
+  return favourableEdge ? 7 : wrongEdge ? 2 : 4;
+}
+
+function regimeCompatibility(
+  family: OpportunityFamily,
+  state: MultiTimeframeStateSnapshot,
+): number {
+  switch (state.composite.state) {
+    case "TREND_CONTINUATION":
+      return family === "IMPULSE_RELOAD" ? 20 : family === "PRESSURE_RELEASE" ? 18 : family === "TIMEFRAME_ROTATION" ? 11 : 7;
+    case "EXPANSION":
+      return family === "PRESSURE_RELEASE" ? 18 : family === "IMPULSE_RELOAD" ? 16 : family === "TIMEFRAME_ROTATION" ? 10 : 6;
+    case "CORRECTION":
+      return family === "IMPULSE_RELOAD" ? 19 : family === "FAILED_BREAK_REVERSAL" ? 15 : family === "TIMEFRAME_ROTATION" ? 14 : 12;
+    case "RANGE":
+      return family === "FAILED_BREAK_REVERSAL" ? 20 : family === "TIMEFRAME_ROTATION" ? 13 : family === "PRESSURE_RELEASE" ? 10 : 5;
+    case "ROTATION":
+      return family === "FAILED_BREAK_REVERSAL" ? 18 : family === "TIMEFRAME_ROTATION" ? 16 : family === "PRESSURE_RELEASE" ? 9 : 7;
+    case "COMPRESSION":
+      return family === "PRESSURE_RELEASE" ? 19 : family === "FAILED_BREAK_REVERSAL" ? 12 : family === "TIMEFRAME_ROTATION" ? 10 : 8;
+    case "TRANSITION": return 8;
+    case "NOISE": return 0;
+    case "INSUFFICIENT_DATA": return 2;
+  }
+}
+
+function alignmentComponent(
+  direction: Exclude<OpportunityDirection, "NEUTRAL">,
+  state: MultiTimeframeStateSnapshot,
+): number {
+  const directionScore = state.composite.direction === direction
+    ? 10
+    : state.composite.direction === "NEUTRAL"
+      ? 5
+      : 1;
+  const alignmentBonus = state.composite.alignment === "FRESH_ALIGNMENT"
+    ? 5
+    : state.composite.alignment === "MATURE_ALIGNMENT"
+      ? 4
+      : state.composite.alignment === "PRODUCTIVE_DISAGREEMENT"
+        ? 3
+        : state.composite.alignment === "MIXED"
+          ? 2
+          : state.composite.alignment === "NEUTRAL"
+            ? 2
+            : 0;
+  return directionScore + alignmentBonus;
+}
+
+function evaluateTradeQuality(input: {
+  family: OpportunityFamily;
+  direction: Exclude<OpportunityDirection, "NEUTRAL">;
+  candidateScore: number;
+  signalTimestampMs: number;
+  feature: PriceBehaviour;
+  state: MultiTimeframeStateSnapshot;
+  targetSpace: TargetSpacePlan;
+  structuralRisk: StructuralRiskPlan;
+  blockers: readonly TradePlanRejectionCode[];
+}): TradeQualityAssessment {
+  const session = classifyXauTradingSession(input.signalTimestampMs);
+  const positiveReasons: string[] = [];
+  const negativeReasons: string[] = [];
+  const components: TradeQualityComponents = {
+    pattern: clampComponent(input.candidateScore * 0.2, 20),
+    regime: clampComponent(regimeCompatibility(input.family, input.state), 20),
+    location: clampComponent((input.state.hourly.locationQuality / 100) * 10 + locationSuitability(input.family, input.direction, input.state), 20),
+    alignment: clampComponent(alignmentComponent(input.direction, input.state), 15),
+    timing: clampComponent(
+      (input.feature.freshnessScore / 100) * 5 +
+        (input.state.m5.freshnessScore / 100) * 5 +
+        (input.feature.lateEntryRisk === "LOW" ? 5 : input.feature.lateEntryRisk === "MEDIUM" ? 3 : 0),
+      15,
+    ),
+    target: clampComponent(
+      input.targetSpace.availableRiskReward >= 2.5
+        ? 15
+        : input.targetSpace.availableRiskReward >= 2
+          ? 13
+          : input.targetSpace.availableRiskReward >= 1.5
+            ? 11
+            : input.targetSpace.availableRiskReward >= 1.2
+              ? 6
+              : 0,
+      15,
+    ),
+    session: session === "LONDON_NEW_YORK_OVERLAP" ? 5 : session === "LONDON" || session === "NEW_YORK" ? 4 : session === "ASIA" ? 2 : 1,
+  };
+
+  if (input.state.composite.direction === input.direction) positiveReasons.push("COMPOSITE_DIRECTION_ALIGNED");
+  else if (input.state.composite.direction !== "NEUTRAL") negativeReasons.push("COMPOSITE_DIRECTION_CONFLICT");
+  if (components.regime >= 15) positiveReasons.push("REGIME_COMPATIBLE");
+  else if (components.regime <= 7) negativeReasons.push("WEAK_REGIME_COMPATIBILITY");
+  if (components.location >= 14) positiveReasons.push("PRODUCTIVE_LOCATION");
+  else if (components.location <= 7) negativeReasons.push("WEAK_OR_MID_RANGE_LOCATION");
+  if (input.feature.lateEntryRisk === "HIGH") negativeReasons.push("HIGH_LATE_ENTRY_RISK");
+  if (input.targetSpace.nearestObstacleClass === "SOFT") positiveReasons.push("ONLY_SOFT_NEAREST_OBSTACLE");
+  if (input.targetSpace.hardObstacleCount > 0) negativeReasons.push("HARD_OBSTACLE_PRESENT");
+  if (session === "LONDON" || session === "NEW_YORK" || session === "LONDON_NEW_YORK_OVERLAP") positiveReasons.push("ACTIVE_LIQUIDITY_SESSION");
+  else negativeReasons.push("LOWER_LIQUIDITY_SESSION");
+
+  let score = Math.min(100, stable(Object.values(components).reduce((sum, value) => sum + value, 0)));
+  if (input.state.composite.state === "NOISE" && (input.state.m5.state === "NOISY" || input.state.m1.quality === "NOISY")) {
+    score = Math.min(score, 54);
+    negativeReasons.push("MULTI_LAYER_NOISE");
+  }
+  if (input.family === "TIMEFRAME_ROTATION") {
+    score = Math.min(score, 64);
+    negativeReasons.push("ROTATION_IS_CONTEXT_ONLY");
+  }
+  if (input.structuralRisk.riskInAverageRanges > 2.5) {
+    score = Math.max(0, score - 5);
+    negativeReasons.push("WIDE_STRUCTURAL_RISK");
+  }
+
+  const hardBlocked = input.blockers.length > 0;
+  const grade: TradeQualityGrade = hardBlocked
+    ? "BLOCKED"
+    : score >= TRADE_MANAGEMENT_CONFIG.gradeAMinimumScore
+      ? "A"
+      : score >= TRADE_MANAGEMENT_CONFIG.mediumSignalMinimumScore
+        ? "B"
+        : "C";
+  return {
+    score,
+    grade,
+    tradeReady: !hardBlocked && (grade === "A" || grade === "B"),
+    session,
+    components,
+    positiveReasons,
+    negativeReasons,
+    semantics: "MEDIUM_ACCURACY_SCORE_NOT_PROFITABILITY_PROOF",
+  };
+}
+
 function buildStaticPlan(
   datasets: Record<Timeframe, TimeframeDataset>,
   signalIndex: number,
@@ -542,6 +783,7 @@ function buildStaticPlan(
   direction: Exclude<OpportunityDirection, "NEUTRAL">,
   candidateScore: number,
   feature: PriceBehaviour,
+  state: MultiTimeframeStateSnapshot,
   averageRange20: number,
   planId: number,
   settings: TradeManagementSettings,
@@ -622,12 +864,14 @@ function buildStaticPlan(
     averageRange20,
   );
   const obstacle = obstacleResult.nearest;
+  const decisionObstacle = obstacleResult.decisionObstacle;
   const expected = expectedMovement(feature, averageRange20);
   const obstacleDistance = obstacle === null ? null : Math.abs(obstacle.price - preferred);
-  const availableDistance = obstacleDistance === null
+  const decisionObstacleDistance = decisionObstacle === null ? null : Math.abs(decisionObstacle.price - preferred);
+  const availableDistance = decisionObstacleDistance === null
     ? expected.expected10MinuteDistance
-    : Math.min(obstacleDistance, expected.expected10MinuteDistance);
-  const limitingFactor = obstacleDistance !== null && obstacleDistance <= expected.expected10MinuteDistance
+    : Math.min(decisionObstacleDistance, expected.expected10MinuteDistance);
+  const limitingFactor = decisionObstacleDistance !== null && decisionObstacleDistance <= expected.expected10MinuteDistance
     ? "HISTORICAL_OBSTACLE" as const
     : "EXPECTED_10M_CAPACITY" as const;
   const availableRiskReward = totalRiskWithCosts > 0
@@ -657,7 +901,7 @@ function buildStaticPlan(
       rewardDistance: stable(target2Distance),
       riskReward: stable(Math.max(0, target2Distance - executionCost) / totalRiskWithCosts),
       source: limitingFactor === "HISTORICAL_OBSTACLE"
-        ? obstacle?.source ?? "EXPECTED_10M_CAPACITY"
+        ? decisionObstacle?.source ?? "EXPECTED_10M_CAPACITY"
         : "EXPECTED_10M_CAPACITY",
     });
   }
@@ -669,14 +913,22 @@ function buildStaticPlan(
       rewardDistance: stable(target3Distance),
       riskReward: stable(Math.max(0, target3Distance - executionCost) / totalRiskWithCosts),
       source: limitingFactor === "HISTORICAL_OBSTACLE"
-        ? obstacle?.source ?? "EXPANSION"
+        ? decisionObstacle?.source ?? "EXPANSION"
         : "EXPANSION",
     });
   }
   const targetSpace: TargetSpacePlan = {
     nearestObstaclePrice: obstacle === null ? null : stable(obstacle.price),
     nearestObstacleSource: obstacle?.source ?? null,
+    nearestObstacleClass: obstacle?.obstacleClass ?? null,
     obstacleDistance: obstacleDistance === null ? null : stable(obstacleDistance),
+    decisionObstaclePrice: decisionObstacle === null ? null : stable(decisionObstacle.price),
+    decisionObstacleSource: decisionObstacle?.source ?? null,
+    decisionObstacleClass: decisionObstacle?.obstacleClass === "HARD" ? "HARD" : decisionObstacle?.obstacleClass === "MEDIUM" ? "MEDIUM" : null,
+    decisionObstacleDistance: decisionObstacleDistance === null ? null : stable(decisionObstacleDistance),
+    softObstacleCount: obstacleResult.classCounts.SOFT,
+    mediumObstacleCount: obstacleResult.classCounts.MEDIUM,
+    hardObstacleCount: obstacleResult.classCounts.HARD,
     expected10MinuteCapacity: stable(expected.expected10MinuteDistance),
     limitingFactor,
     obstacleCandidatesEvaluated: obstacleResult.candidateCount,
@@ -692,6 +944,24 @@ function buildStaticPlan(
   const inside = close >= lower && close <= upper;
   if (inside) reasons.push("ENTRY_INSIDE_ZONE");
   else reasons.push("ENTRY_WAITING_RETEST");
+
+  const structuralBlockers = [...new Set(rejectionReasons)];
+  const quality = evaluateTradeQuality({
+    family,
+    direction,
+    candidateScore,
+    signalTimestampMs,
+    feature,
+    state,
+    targetSpace,
+    structuralRisk,
+    blockers: structuralBlockers,
+  });
+  if (family === "TIMEFRAME_ROTATION") rejectionReasons.push("TIMEFRAME_ROTATION_CONTEXT_ONLY");
+  else if (quality.grade === "C") rejectionReasons.push("QUALITY_BELOW_MEDIUM");
+  const finalQuality = rejectionReasons.length > structuralBlockers.length
+    ? { ...quality, grade: "BLOCKED" as const, tradeReady: false }
+    : quality;
 
   const initialStatus: TradePlanStatus = rejectionReasons.length > 0
     ? "REJECTED"
@@ -721,6 +991,8 @@ function buildStaticPlan(
     structuralRisk,
     targetSpace,
     expectedMovement: expected,
+    quality: finalQuality,
+    marketEpisodeId: `${direction}:${Math.floor(signalTimestampMs / (TRADE_MANAGEMENT_CONFIG.marketEpisodeMergeMinutes * MINUTE_MS))}`,
     reasons,
     rejectionReasons: [...new Set(rejectionReasons)],
     limitations,
@@ -1034,6 +1306,7 @@ function snapshotForPlan(
     entryZone: plan.entryZone,
     structuralRisk: plan.structuralRisk,
     targetSpace: plan.targetSpace,
+    quality: plan.quality,
     expectedMovement: plan.expectedMovement,
     filledExecution: entered ? filledExecutionMetrics(plan) : null,
     executionCosts: plan.executionCosts,
@@ -1089,6 +1362,10 @@ function eventFromPlan(plan: PlanRecord, status = plan.initialStatus): TradePlan
     tp2Price: tp2?.price ?? null,
     candidateScore: plan.candidateScore,
     riskRewardToTp1: filledExecutionMetrics(plan)?.actualRiskRewardToTp1 ?? tp1.riskReward,
+    qualityScore: plan.quality.score,
+    qualityGrade: plan.quality.grade,
+    tradeReady: plan.quality.tradeReady,
+    marketEpisodeId: plan.marketEpisodeId,
   };
 }
 
@@ -1126,12 +1403,17 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
   let qualifiedSamples = 0;
   let barsToEntryTotal = 0;
   let barsToEntrySamples = 0;
+  let qualityScoreTotal = 0;
 
   forEachPriceBehaviour(candles, (feature, candleIndex) => {
     const priorAverageRange20 = averagePriorRange(prefixRange, candleIndex, 20);
     const averageRange20 = Math.max(
       priorAverageRange20 > 0 ? priorAverageRange20 : candles[candleIndex][2] - candles[candleIndex][3],
       0.01,
+    );
+    const stateAtCandle = analyzeMultiTimeframeStateAt(
+      signalIndex.stateIndex,
+      candles[candleIndex][0] + MINUTE_MS,
     );
     let primaryFamily = NONE;
     let primaryPriority = -1;
@@ -1146,6 +1428,7 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
         signal.direction !== "NEUTRAL";
 
       if (isNewConfirmation && signal) {
+        if (!stateAtCandle) continue;
         if (plan && !isTerminal(plan.finalStatus)) {
           plan.finalStatus = "INVALIDATED";
           plan.finalHealth = "INVALIDATED";
@@ -1161,6 +1444,7 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
           signal.direction as Exclude<OpportunityDirection, "NEUTRAL">,
           signal.candidateScore,
           feature,
+          stateAtCandle,
           averageRange20,
           plans.length,
           settings,
@@ -1172,6 +1456,7 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
         plans.push(plan);
         runtime.planId = plan.id;
         createdPlanCount += 1;
+        qualityScoreTotal += plan.quality.score;
         riskTotal += plan.structuralRisk.riskDistance;
         rrTotal += plan.targetSpace.targets[0]?.riskReward ?? 0;
         if (plan.initialStatus === "REJECTED") rejectedPlanCount += 1;
@@ -1237,6 +1522,12 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
     for (const limitation of new Set(plan.limitations)) limitationCounts[limitation] += 1;
   }
 
+  const gradeCounts = countRecord<TradeQualityGrade>(["A", "B", "C", "BLOCKED"]);
+  for (const plan of plans) gradeCounts[plan.quality.grade] += 1;
+  const readySelection = selectTradeReadyPlans(plans);
+  const tradeReadySignalCount = readySelection.selected.length;
+  const duplicateEpisodeCount = readySelection.suppressedCount;
+
   const summary: TradeManagementSummary = {
     sampleCount: candles.length,
     createdPlanCount,
@@ -1249,6 +1540,10 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
     tp1HitCount,
     tp2HitCount,
     completedPlanCount,
+    tradeReadySignalCount,
+    gradeCounts,
+    averageQualityScore: createdPlanCount > 0 ? stable(qualityScoreTotal / createdPlanCount) : 0,
+    duplicateEpisodeCount,
     statusCounts,
     rejectionReasonCounts,
     limitationCounts,
@@ -1287,6 +1582,175 @@ export function getOrCreateTradeManagementIndex(
   return created;
 }
 
+function selectedPlans(
+  index: TradeManagementIndex,
+  fromTimestampMs: number,
+  toTimestampMs: number,
+): PlanRecord[] {
+  return index.plans.filter(
+    (plan) => plan.signalTimestampMs >= fromTimestampMs && plan.signalTimestampMs < toTimestampMs,
+  );
+}
+
+export function summarizeTradeManagementRange(
+  index: TradeManagementIndex,
+  fromTimestampMs: number,
+  toTimestampMs: number,
+): TradeManagementSummary {
+  const plans = selectedPlans(index, fromTimestampMs, toTimestampMs);
+  const statusCounts = countRecord(STATUSES);
+  const rejectionReasonCounts = countRecord(REJECTIONS);
+  const limitationCounts = countRecord(LIMITATIONS);
+  const gradeCounts = countRecord<TradeQualityGrade>(["A", "B", "C", "BLOCKED"]);
+  const strongest = [...plans]
+    .sort((a, b) => b.quality.score - a.quality.score || b.candidateScore - a.candidateScore)
+    .slice(0, TRADE_MANAGEMENT_CONFIG.strongestPlanLimit)
+    .map((plan) => eventFromPlan(plan, plan.finalStatus));
+  const recentEvents = [...plans]
+    .sort((a, b) => a.signalTimestampMs - b.signalTimestampMs)
+    .slice(-30)
+    .map((plan) => eventFromPlan(plan, plan.finalStatus));
+
+  let qualifiedPlanCount = 0;
+  let rejectedPlanCount = 0;
+  let enteredPlanCount = 0;
+  let expiredPlanCount = 0;
+  let invalidatedPlanCount = 0;
+  let ambiguousPlanCount = 0;
+  let tp1HitCount = 0;
+  let tp2HitCount = 0;
+  let completedPlanCount = 0;
+  let riskTotal = 0;
+  let rrTotal = 0;
+  let qualityTotal = 0;
+  let barsToEntryTotal = 0;
+  let barsToEntrySamples = 0;
+  const candles = index.signalIndex.stateIndex.datasets.M1.candles;
+
+  for (const plan of plans) {
+    statusCounts[plan.finalStatus] += 1;
+    gradeCounts[plan.quality.grade] += 1;
+    riskTotal += plan.structuralRisk.riskDistance;
+    rrTotal += plan.targetSpace.targets[0]?.riskReward ?? 0;
+    qualityTotal += plan.quality.score;
+    if (plan.initialStatus === "REJECTED") rejectedPlanCount += 1;
+    else qualifiedPlanCount += 1;
+    if (plan.enteredIndex >= 0) {
+      enteredPlanCount += 1;
+      barsToEntryTotal += plan.enteredIndex - plan.signalIndex;
+      barsToEntrySamples += 1;
+    }
+    if (plan.finalStatus === "EXPIRED") expiredPlanCount += 1;
+    if (plan.finalStatus === "INVALIDATED") invalidatedPlanCount += 1;
+    if (plan.finalStatus === "AMBIGUOUS_INTRABAR") ambiguousPlanCount += 1;
+    if (plan.highestTargetHit >= 1) tp1HitCount += 1;
+    if (plan.highestTargetHit >= 2) tp2HitCount += 1;
+    if (plan.finalStatus === "COMPLETED") completedPlanCount += 1;
+    for (const rejection of new Set([
+      ...plan.rejectionReasons,
+      ...dynamicRejectionsFor(plan.finalStatus, plan.terminalRejection),
+    ])) rejectionReasonCounts[rejection] += 1;
+    for (const limitation of new Set(plan.limitations)) limitationCounts[limitation] += 1;
+  }
+
+  let startIndex = 0;
+  while (startIndex < candles.length && candles[startIndex][0] + MINUTE_MS < fromTimestampMs) startIndex += 1;
+  let endIndex = startIndex;
+  while (endIndex < candles.length && candles[endIndex][0] + MINUTE_MS < toTimestampMs) endIndex += 1;
+
+  const readySelection = selectTradeReadyPlans(plans);
+
+  return {
+    sampleCount: Math.max(0, endIndex - startIndex),
+    createdPlanCount: plans.length,
+    qualifiedPlanCount,
+    rejectedPlanCount,
+    enteredPlanCount,
+    expiredPlanCount,
+    invalidatedPlanCount,
+    ambiguousPlanCount,
+    tp1HitCount,
+    tp2HitCount,
+    completedPlanCount,
+    tradeReadySignalCount: readySelection.selected.length,
+    gradeCounts,
+    averageQualityScore: plans.length > 0 ? stable(qualityTotal / plans.length) : 0,
+    duplicateEpisodeCount: readySelection.suppressedCount,
+    statusCounts,
+    rejectionReasonCounts,
+    limitationCounts,
+    averageRiskDistance: plans.length > 0 ? stable(riskTotal / plans.length) : 0,
+    averageTp1RiskReward: plans.length > 0 ? stable(rrTotal / plans.length) : 0,
+    averageBarsToEntry: barsToEntrySamples > 0 ? stable(barsToEntryTotal / barsToEntrySamples) : 0,
+    strongestPlans: strongest,
+    recentEvents,
+  };
+}
+
+function chartIndexAtOrBefore(candles: readonly CompactCandle[], timestampMs: number): number {
+  let low = 0;
+  let high = candles.length - 1;
+  let answer = -1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    if (candles[middle][0] <= timestampMs) {
+      answer = middle;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return answer;
+}
+
+function familyShortLabel(family: OpportunityFamily): string {
+  if (family === "PRESSURE_RELEASE") return "PR";
+  if (family === "FAILED_BREAK_REVERSAL") return "FBR";
+  if (family === "IMPULSE_RELOAD") return "IR";
+  return "TR";
+}
+
+/** Returns deduplicated A/B markers. Research-level Phase 6 markers remain separate. */
+export function createTradeReadyMarkersForWindow(
+  index: TradeManagementIndex,
+  chartTimeframe: Timeframe,
+  chartCandles: readonly CompactCandle[],
+  absoluteOffset: number,
+  absoluteEnd: number,
+  dailyBoundaryMode: DailyBoundaryMode,
+): ChartSignalMarker[] {
+  if (chartCandles.length === 0 || absoluteEnd <= absoluteOffset) return [];
+  const start = Math.max(0, Math.min(chartCandles.length - 1, absoluteOffset));
+  const end = Math.max(start + 1, Math.min(chartCandles.length, absoluteEnd));
+  const windowStart = chartCandles[start][0];
+  const lastOpen = chartCandles[end - 1][0];
+  const windowEnd = chartTimeframe === "D1"
+    ? getNextDailyBucketStart(lastOpen, dailyBoundaryMode)
+    : lastOpen + TIMEFRAME_MS[chartTimeframe];
+  const windowPlans = index.plans.filter((plan) => {
+    const signalOpenMs = plan.signalTimestampMs - MINUTE_MS;
+    return signalOpenMs >= windowStart && signalOpenMs < windowEnd;
+  });
+  return selectTradeReadyPlans(windowPlans).selected
+    .sort((a, b) => a.signalTimestampMs - b.signalTimestampMs)
+    .flatMap((plan): ChartSignalMarker[] => {
+      const chartIndex = chartIndexAtOrBefore(chartCandles, plan.signalTimestampMs - MINUTE_MS);
+      if (chartIndex < start || chartIndex >= end) return [];
+      return [{
+        timestampMs: chartCandles[chartIndex][0],
+        eventTimestampMs: plan.signalTimestampMs,
+        family: plan.family,
+        direction: plan.direction,
+        lifecycle: plan.reasons.includes("PHASE6_CONTINUATION") ? "CONTINUATION" : "CONFIRMED",
+        action: plan.action,
+        score: plan.quality.score,
+        referencePrice: plan.entryZone.preferred,
+        label: `${plan.action} ${plan.quality.grade} ${familyShortLabel(plan.family)} ${Math.round(plan.quality.score)}`,
+        markerKind: "TRADE_READY",
+        grade: plan.quality.grade,
+        planStatus: plan.finalStatus,
+      }];
+    });
+}
+
 export function analyzeTradeManagementAt(
   index: TradeManagementIndex,
   anchorTimestampMs: number,
@@ -1301,14 +1765,17 @@ export function createTradePlanHistory(
   requestedOffset: number,
   requestedLimit: number,
   maximumLimit = 5_000,
+  fromTimestampMs = Number.NEGATIVE_INFINITY,
+  toTimestampMs = Number.POSITIVE_INFINITY,
 ): TradePlanHistoryResponse {
-  const total = index.plans.length;
+  const sourcePlans = selectedPlans(index, fromTimestampMs, toTimestampMs);
+  const total = sourcePlans.length;
   const limit = Math.max(1, Math.min(maximumLimit, Math.floor(requestedLimit)));
   const maximumOffset = Math.max(0, total - limit);
   const offset = Math.max(0, Math.min(maximumOffset, Math.floor(requestedOffset)));
   const end = Math.min(total, offset + limit);
   const candles = index.signalIndex.stateIndex.datasets.M1.candles;
-  const items: TradePlanHistoryItem[] = index.plans.slice(offset, end).map((plan) => ({
+  const items: TradePlanHistoryItem[] = sourcePlans.slice(offset, end).map((plan) => ({
     ...eventFromPlan(plan, plan.finalStatus),
     signalTimestampMs: plan.signalTimestampMs,
     enteredAtMs: plan.enteredIndex >= 0
@@ -1321,6 +1788,7 @@ export function createTradePlanHistory(
     entryZone: plan.entryZone,
     structuralRisk: plan.structuralRisk,
     targetSpace: plan.targetSpace,
+    quality: plan.quality,
     expectedMovement: plan.expectedMovement,
     filledExecution: filledExecutionMetrics(plan),
     executionCosts: plan.executionCosts,
@@ -1345,6 +1813,7 @@ export interface TradePlanCreationInput {
   feature: PriceBehaviour;
   settings?: Partial<TradeManagementSettings>;
   higherTimeframeDatasets?: Partial<Record<"M5" | "M15" | "H1" | "D1", TimeframeDataset>>;
+  dailyBoundaryMode?: DailyBoundaryMode;
 }
 
 /** Deterministic plan-construction helper for replay, fixtures and family-rule tests. */
@@ -1373,6 +1842,13 @@ export function simulateTradePlanCreation(input: TradePlanCreationInput): TradeP
     H1: input.higherTimeframeDatasets?.H1 ?? emptyDataset,
     D1: input.higherTimeframeDatasets?.D1 ?? emptyDataset,
   };
+  const state = analyzeMultiTimeframeStateAt(
+    getOrCreateMultiTimeframeStateIndex(datasets, {
+      dailyBoundaryMode: input.dailyBoundaryMode ?? "NEW_YORK_17",
+    }),
+    input.candles[input.signalIndex][0] + MINUTE_MS,
+  );
+  if (!state) throw new Error("Could not build a market-state snapshot for the supplied signal.");
   const plan = buildStaticPlan(
     datasets,
     input.signalIndex,
@@ -1380,6 +1856,7 @@ export function simulateTradePlanCreation(input: TradePlanCreationInput): TradeP
     input.direction,
     input.candidateScore,
     input.feature,
+    state,
     averageRange20,
     0,
     resolveSettings(input.settings),
@@ -1400,6 +1877,7 @@ export function simulateTradePlanCreation(input: TradePlanCreationInput): TradeP
     entryZone: plan.entryZone,
     structuralRisk: plan.structuralRisk,
     targetSpace: plan.targetSpace,
+    quality: plan.quality,
     expectedMovement: plan.expectedMovement,
     filledExecution: null,
     executionCosts: plan.executionCosts,

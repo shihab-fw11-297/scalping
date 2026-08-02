@@ -757,6 +757,8 @@ function createCountRecord<T extends string>(values: readonly T[]): Record<T, nu
 export function summarizeHypothesesAndOpportunities(
   index: HypothesisOpportunityIndex,
   strongestLimit = HYPOTHESIS_OPPORTUNITY_CONFIG.strongestOpportunityLimit,
+  fromTimestampMs = Number.NEGATIVE_INFINITY,
+  toTimestampMs = Number.POSITIVE_INFINITY,
 ): { summary: HypothesisOpportunitySummary; latest: HypothesisOpportunitySnapshot | null } {
   const leadingHypothesisCounts = createCountRecord(HYPOTHESIS_DIRECTIONS);
   const opportunityStageCounts = createCountRecord(OPPORTUNITY_STAGES);
@@ -770,6 +772,7 @@ export function summarizeHypothesesAndOpportunities(
   let latest: HypothesisOpportunitySnapshot | null = null;
 
   forEachMultiTimeframeState(index.stateIndex, (state, feature) => {
+    if (state.timestampMs < fromTimestampMs || state.timestampMs >= toTimestampMs) return;
     const result = evaluateHypothesesAndOpportunities(state, feature);
     latest = result;
     sampleCount += 1;

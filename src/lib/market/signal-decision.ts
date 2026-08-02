@@ -1257,6 +1257,130 @@ export function getOrCreateSignalDecisionIndex(
   return created;
 }
 
+function firstM1IndexAtOrAfter(candles: readonly CompactCandle[], timestampMs: number): number {
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (candles[middle][0] + MINUTE_MS < timestampMs) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/** Rebuilds Phase 6 statistics only for the user-selected interval, excluding warm-up candles. */
+export function summarizeSignalDecisionRange(
+  index: SignalDecisionIndex,
+  fromTimestampMs: number,
+  toTimestampMs: number,
+): SignalDecisionSummary {
+  const candles = index.stateIndex.datasets.M1.candles;
+  const start = firstM1IndexAtOrAfter(candles, fromTimestampMs);
+  const end = firstM1IndexAtOrAfter(candles, toTimestampMs);
+  const lifecycleCounts = createCountRecord(LIFECYCLES);
+  const actionCounts = createCountRecord(ACTIONS);
+  const confirmedByFamily = createCountRecord(SIGNAL_OPPORTUNITY_FAMILIES);
+  const confirmedByDirection = { BULLISH: 0, BEARISH: 0 };
+  const noTradeReasonCounts = createCountRecord(NO_TRADE_REASONS);
+  const strongestSignals = new FixedMinHeap<SignalDecisionEvent>(
+    SIGNAL_DECISION_CONFIG.strongestSignalLimit,
+    (item) => item.score,
+  );
+  const recentEvents: SignalDecisionEvent[] = [];
+  let confirmedSignalCount = 0;
+  let continuationSignalCount = 0;
+  let invalidationCount = 0;
+  let duplicateSuppressedCount = 0;
+  let expiredCandidateCount = 0;
+  let armedEpisodeCount = 0;
+  let watchToArmedTotal = 0;
+  let watchToArmedSamples = 0;
+  let armedToConfirmedTotal = 0;
+  let armedToConfirmedSamples = 0;
+
+  for (let candleIndex = start; candleIndex < end; candleIndex += 1) {
+    const primaryFamily = index.arrays.primaryFamily[candleIndex];
+    const primaryLifecycle = CODE_LIFECYCLE[index.arrays.primaryState[candleIndex]] ?? "OBSERVING";
+    lifecycleCounts[primaryLifecycle] += 1;
+    const primaryDirection = primaryFamily >= 0
+      ? CODE_DIRECTION[index.arrays.direction[familySlot(candleIndex, primaryFamily)]] ?? "NEUTRAL"
+      : "NEUTRAL";
+    actionCounts[actionFor(primaryLifecycle, primaryDirection)] += 1;
+
+    for (let familyIndex = 0; familyIndex < SIGNAL_OPPORTUNITY_FAMILIES.length; familyIndex += 1) {
+      const slot = familySlot(candleIndex, familyIndex);
+      const lifecycle = CODE_LIFECYCLE[index.arrays.state[slot]] ?? "OBSERVING";
+      const direction = CODE_DIRECTION[index.arrays.direction[slot]] ?? "NEUTRAL";
+      const reasons = decodeReasons(index.arrays.reasonMask[slot]);
+      if (reasons.includes("DUPLICATE_SUPPRESSED")) duplicateSuppressedCount += 1;
+      if (reasons.includes("CANDIDATE_EXPIRED")) expiredCandidateCount += 1;
+      for (const reason of decodeNoTrade(index.arrays.noTradeMask[slot])) noTradeReasonCounts[reason] += 1;
+
+      const previousLifecycle = candleIndex > start
+        ? CODE_LIFECYCLE[index.arrays.state[familySlot(candleIndex - 1, familyIndex)]] ?? "OBSERVING"
+        : "OBSERVING";
+      if (lifecycle === "ARMED" && previousLifecycle !== "ARMED") {
+        armedEpisodeCount += 1;
+        const watchIndex = index.arrays.watchIndex[slot];
+        if (watchIndex >= 0) {
+          watchToArmedTotal += candleIndex - watchIndex;
+          watchToArmedSamples += 1;
+        }
+      }
+
+      if (index.arrays.eventFlag[slot] !== 1) continue;
+      const family = SIGNAL_OPPORTUNITY_FAMILIES[familyIndex];
+      const score = index.arrays.candidateScore[slot];
+      const event: SignalDecisionEvent = {
+        timestampMs: candles[candleIndex][0] + MINUTE_MS,
+        family,
+        direction,
+        lifecycle: lifecycle === "CONTINUATION" ? "CONTINUATION" : lifecycle === "INVALIDATED" ? "INVALIDATED" : "CONFIRMED",
+        action: actionFor(lifecycle, direction),
+        score,
+        referencePrice: index.arrays.referencePrice[slot],
+        episodeId: episodeId(index, family, direction, index.arrays.episodeStartIndex[slot]) ?? `${family}:${direction}:${candles[candleIndex][0] + MINUTE_MS}`,
+      };
+      recentEvents.push(event);
+      if (recentEvents.length > 30) recentEvents.shift();
+      if (lifecycle === "CONFIRMED" || lifecycle === "CONTINUATION") {
+        if (lifecycle === "CONFIRMED") confirmedSignalCount += 1;
+        else continuationSignalCount += 1;
+        confirmedByFamily[family] += 1;
+        if (direction === "BULLISH" || direction === "BEARISH") confirmedByDirection[direction] += 1;
+        strongestSignals.push(event);
+        const armedIndex = index.arrays.armedIndex[slot];
+        if (armedIndex >= 0) {
+          armedToConfirmedTotal += candleIndex - armedIndex;
+          armedToConfirmedSamples += 1;
+        }
+      } else if (lifecycle === "INVALIDATED") {
+        invalidationCount += 1;
+      }
+    }
+  }
+
+  const sampleCount = Math.max(0, end - start);
+  return {
+    sampleCount,
+    lifecycleCounts,
+    actionCounts,
+    confirmedByFamily,
+    confirmedByDirection,
+    noTradeReasonCounts,
+    confirmedSignalCount,
+    continuationSignalCount,
+    invalidationCount,
+    duplicateSuppressedCount,
+    expiredCandidateCount,
+    armedEpisodeCount,
+    averageWatchToArmedBars: watchToArmedSamples > 0 ? stable(watchToArmedTotal / watchToArmedSamples) : 0,
+    averageArmedToConfirmedBars: armedToConfirmedSamples > 0 ? stable(armedToConfirmedTotal / armedToConfirmedSamples) : 0,
+    strongestSignals: strongestSignals.toDescendingArray(),
+    recentEvents,
+  };
+}
+
 export function analyzeSignalDecisionAt(
   index: SignalDecisionIndex,
   anchorTimestampMs: number,
@@ -1300,8 +1424,16 @@ export function createSignalDecisionHistory(
   requestedOffset: number,
   requestedLimit: number,
   maximumLimit = 5_000,
+  fromTimestampMs = Number.NEGATIVE_INFINITY,
+  toTimestampMs = Number.POSITIVE_INFINITY,
 ): SignalDecisionHistoryResponse {
-  const total = index.eventSlots.length;
+  const filteredSlots: number[] = [];
+  for (const slot of index.eventSlots) {
+    const candleIndex = Math.floor(slot / SIGNAL_OPPORTUNITY_FAMILIES.length);
+    const timestampMs = index.stateIndex.datasets.M1.candles[candleIndex]?.[0] + MINUTE_MS;
+    if (timestampMs >= fromTimestampMs && timestampMs < toTimestampMs) filteredSlots.push(slot);
+  }
+  const total = filteredSlots.length;
   const limit = Math.max(1, Math.min(maximumLimit, Math.floor(requestedLimit)));
   const maximumOffset = Math.max(0, total - limit);
   const offset = Math.max(0, Math.min(maximumOffset, Math.floor(requestedOffset)));
@@ -1309,7 +1441,7 @@ export function createSignalDecisionHistory(
   const items: SignalDecisionHistoryItem[] = [];
 
   for (let eventIndex = offset; eventIndex < end; eventIndex += 1) {
-    const slot = index.eventSlots[eventIndex];
+    const slot = filteredSlots[eventIndex];
     const candleIndex = Math.floor(slot / SIGNAL_OPPORTUNITY_FAMILIES.length);
     const familyIndex = slot % SIGNAL_OPPORTUNITY_FAMILIES.length;
     const lifecycle = CODE_LIFECYCLE[index.arrays.state[slot]];
@@ -1433,6 +1565,7 @@ export function createSignalMarkersForWindow(
       label: lifecycle === "INVALIDATED"
         ? `${lifecycleLabel} ${familyLabel(family)}`
         : `${action} ${lifecycleLabel} ${familyLabel(family)} ${score}`,
+      markerKind: "RESEARCH",
     });
   }
   return markers;

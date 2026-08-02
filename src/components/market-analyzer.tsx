@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { BehaviourSummaryPanel } from "./behaviour-summary";
 import { DataTable } from "./data-table";
 import { MarketChart } from "./market-chart";
@@ -21,6 +21,78 @@ import type {
 
 const TIMEFRAMES: Timeframe[] = ["M1", "M5", "M15", "H1", "D1"];
 const WINDOW_SIZES = [500, 1_000, 2_000, 5_000] as const;
+
+function windowCacheKey(timeframe: Timeframe, offset: number, limit: number): string {
+  return `${timeframe}:${Math.max(0, offset)}:${limit}`;
+}
+
+function addRecoveryParams(
+  params: URLSearchParams,
+  recovery: AnalyzeMarketResponse["recoveryRequest"],
+): void {
+  params.set("recoveryFromUtc", recovery.fromUtc);
+  params.set("recoveryToUtc", recovery.toUtc);
+  params.set("recoverySpread", String(recovery.assumedSpreadPrice));
+  params.set("recoverySlippage", String(recovery.assumedSlippagePrice));
+  params.set("recoveryMinimumRiskReward", String(recovery.minimumRiskReward));
+  params.set("recoveryMaximumRiskRanges", String(recovery.maximumRiskInAverageRanges));
+}
+
+function downloadBlob(content: string, mimeType: string, filename: string): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function createReadableReport(report: AnalysisReport): string {
+  const summary = report.summary;
+  const familyRows = Object.entries(report.familyBreakdown).map(([family, item]) =>
+    `| ${family} | ${item.confirmedSignals} | ${item.gradeA} | ${item.gradeB} | ${item.tradeReady} | ${item.entriesObserved} | ${item.tp1Hit} |`,
+  );
+  return [
+    "# XAUUSD Analysis Report",
+    "",
+    `- Analysis ID: \`${report.analysisId}\``,
+    `- Period: ${summary.requestedFromUtc} to ${summary.requestedToUtc}`,
+    `- Visible M1 candles: ${summary.dataQuality.validM1Candles}`,
+    `- Warm-up M1 candles: ${summary.dataQuality.warmupM1Candles}`,
+    `- Closed/stale candles removed: ${summary.dataQuality.closedMarketCandlesRemoved}/${summary.dataQuality.staleCandlesRemoved}`,
+    `- Pattern confirmations: ${summary.signalOverview.confirmed + summary.signalOverview.continuations}`,
+    `- Trade-ready A/B signals: ${summary.tradeOverview.tradeReadySignals}`,
+    `- Grade A / B / C: ${summary.tradeOverview.gradeA} / ${summary.tradeOverview.gradeB} / ${summary.tradeOverview.gradeC}`,
+    `- Average trade quality: ${summary.tradeOverview.averageQualityScore}`,
+    `- Duplicate episodes suppressed: ${summary.tradeOverview.duplicateEpisodesSuppressed}`,
+    `- Qualified plans: ${summary.tradeOverview.qualified}`,
+    `- Entries observed: ${summary.tradeOverview.entered}`,
+    `- TP1 hit: ${summary.tradeOverview.tp1Hit}`,
+    `- Completed: ${summary.tradeOverview.completed}`,
+    "",
+    "## Observed rates",
+    "",
+    `- Qualification: ${summary.observedRates.qualificationRatePercent}%`,
+    `- Entry fill: ${summary.observedRates.entryFillRatePercent}%`,
+    `- TP1 progress: ${summary.observedRates.tp1ProgressRatePercent}%`,
+    `- Completion: ${summary.observedRates.completionRatePercent}%`,
+    "",
+    "## Family breakdown",
+    "",
+    "| Family | Confirmed | Grade A | Grade B | Trade-ready | Entries | TP1 |",
+    "|---|---:|---:|---:|---:|---:|---:|",
+    ...familyRows,
+    "",
+    "## Key findings",
+    "",
+    ...summary.keyFindings.map((item) => `- ${item}`),
+    "",
+    `The JSON report contains ${report.signalEvents.length} signal events and ${report.tradePlans.length} trade plans.`,
+  ].join("\n");
+}
 
 function toLocalInputValue(date: Date): string {
   const offsetMs = date.getTimezoneOffset() * 60_000;
@@ -52,6 +124,7 @@ export function MarketAnalyzer() {
   const [loading, setLoading] = useState(false);
   const [loadingWindow, setLoadingWindow] = useState(false);
   const [timeframe, setTimeframe] = useState<Timeframe>("M5");
+  const [requestedTimeframe, setRequestedTimeframe] = useState<Timeframe | null>(null);
   const [windowSize, setWindowSize] = useState<number>(2_000);
   const [pendingOffset, setPendingOffset] = useState(0);
   const [assumedSpreadPrice, setAssumedSpreadPrice] = useState(0.25);
@@ -60,39 +133,18 @@ export function MarketAnalyzer() {
   const [maximumRiskInAverageRanges, setMaximumRiskInAverageRanges] = useState(3.5);
   const [currentReport, setCurrentReport] = useState<AnalysisReport | null>(null);
   const [collectedReports, setCollectedReports] = useState<AnalysisReport[]>([]);
-  const [reportLoading, setReportLoading] = useState(false);
-  const [showConfirmedSignals, setShowConfirmedSignals] = useState(true);
-  const [showContinuationSignals, setShowContinuationSignals] = useState(true);
+  const [windowCache, setWindowCache] = useState<Record<string, MarketWindowResponse>>({});
+  const [showGradeA, setShowGradeA] = useState(true);
+  const [showGradeB, setShowGradeB] = useState(true);
+  const [showResearchSignals, setShowResearchSignals] = useState(false);
   const [showInvalidations, setShowInvalidations] = useState(false);
   const [showTradeLevels, setShowTradeLevels] = useState(true);
+  const windowRequestSequence = useRef(0);
 
   const total = result?.timeframes[timeframe].candleCount ?? 0;
   const availableWindowSizes = WINDOW_SIZES.filter((size) => size <= (result?.meta.maxWindowCandles ?? 5_000));
   const maximumOffset = Math.max(0, total - windowSize);
   const safePendingOffset = Math.min(maximumOffset, pendingOffset);
-
-
-  async function loadCompleteReport(analysisId: string): Promise<void> {
-    setReportLoading(true);
-    try {
-      const params = new URLSearchParams({ analysisId, format: "json" });
-      const response = await fetch(`/api/market/report?${params}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await readError(response));
-      const report = (await response.json()) as AnalysisReport;
-      setCurrentReport(report);
-      setCollectedReports((previous) => {
-        const withoutDuplicate = previous.filter((item) => item.analysisId !== report.analysisId);
-        return [...withoutDuplicate, report].slice(-6);
-      });
-    } catch (caught) {
-      setError(caught instanceof Error
-        ? `Analysis loaded, but complete report generation failed: ${caught.message}`
-        : "Analysis loaded, but complete report generation failed.");
-    } finally {
-      setReportLoading(false);
-    }
-  }
-
   function downloadReportBundle(): void {
     if (collectedReports.length === 0) return;
     const bundle: AnalysisReportBundle = {
@@ -101,15 +153,29 @@ export function MarketAnalyzer() {
       reportCount: collectedReports.length,
       reports: collectedReports,
     };
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `xauusd-analysis-bundle-${collectedReports.length}-reports.json`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    downloadBlob(
+      JSON.stringify(bundle, null, 2),
+      "application/json",
+      `xauusd-analysis-bundle-${collectedReports.length}-reports.json`,
+    );
+  }
+
+  function downloadCurrentReport(format: "json" | "md"): void {
+    if (!currentReport) return;
+    const period = currentReport.summary.requestedFromUtc.slice(0, 10);
+    if (format === "json") {
+      downloadBlob(
+        JSON.stringify(currentReport, null, 2),
+        "application/json",
+        `xauusd-report-${period}.json`,
+      );
+      return;
+    }
+    downloadBlob(
+      createReadableReport(currentReport),
+      "text/markdown;charset=utf-8",
+      `xauusd-report-${period}.md`,
+    );
   }
 
   async function submit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
@@ -145,8 +211,18 @@ export function MarketAnalyzer() {
       setTimeframe(parsed.initialWindow.timeframe);
       setWindowSize(parsed.initialWindow.limit);
       setPendingOffset(parsed.initialWindow.offset);
-      setCurrentReport(null);
-      void loadCompleteReport(parsed.analysisId);
+      setCurrentReport(parsed.completeReport);
+      setCollectedReports((previous) => {
+        const withoutDuplicate = previous.filter((item) => item.analysisId !== parsed.completeReport.analysisId);
+        return [...withoutDuplicate, parsed.completeReport].slice(-6);
+      });
+      setWindowCache({
+        [windowCacheKey(
+          parsed.initialWindow.timeframe,
+          parsed.initialWindow.offset,
+          parsed.initialWindow.limit,
+        )]: parsed.initialWindow,
+      });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unexpected error.");
     } finally {
@@ -160,26 +236,51 @@ export function MarketAnalyzer() {
     nextLimit: number,
   ): Promise<void> {
     if (!result) return;
+    const requestedOffset = Math.max(0, nextOffset);
+    const key = windowCacheKey(nextTimeframe, requestedOffset, nextLimit);
+    const cachedWindow = windowCache[key];
+    if (cachedWindow) {
+      setWindowData(cachedWindow);
+      setTimeframe(nextTimeframe);
+      setWindowSize(cachedWindow.limit);
+      setPendingOffset(cachedWindow.offset);
+      setError(null);
+      setRequestedTimeframe(null);
+      return;
+    }
+
+    const requestSequence = ++windowRequestSequence.current;
+    setRequestedTimeframe(nextTimeframe);
     setLoadingWindow(true);
     setError(null);
     try {
       const params = new URLSearchParams({
         analysisId: result.analysisId,
         timeframe: nextTimeframe,
-        offset: String(Math.max(0, nextOffset)),
+        offset: String(requestedOffset),
         limit: String(nextLimit),
       });
+      addRecoveryParams(params, result.recoveryRequest);
       const response = await fetch(`/api/market/window?${params}`, { cache: "no-store" });
       if (!response.ok) throw new Error(await readError(response));
       const next = (await response.json()) as MarketWindowResponse;
+      if (requestSequence !== windowRequestSequence.current) return;
       setWindowData(next);
       setTimeframe(nextTimeframe);
-      setWindowSize(nextLimit);
+      setWindowSize(next.limit);
       setPendingOffset(next.offset);
+      setWindowCache((previous) => ({
+        ...previous,
+        [windowCacheKey(nextTimeframe, next.offset, next.limit)]: next,
+      }));
     } catch (caught) {
+      if (requestSequence !== windowRequestSequence.current) return;
       setError(caught instanceof Error ? caught.message : "Could not load chart window.");
     } finally {
-      setLoadingWindow(false);
+      if (requestSequence === windowRequestSequence.current) {
+        setLoadingWindow(false);
+        setRequestedTimeframe(null);
+      }
     }
   }
 
@@ -206,6 +307,7 @@ export function MarketAnalyzer() {
       timeframe,
       format,
     });
+    addRecoveryParams(params, result.recoveryRequest);
     return `/api/market/export?${params}`;
   }
 
@@ -216,6 +318,7 @@ export function MarketAnalyzer() {
       analysisId: result.analysisId,
       format,
     });
+    addRecoveryParams(params, result.recoveryRequest);
     return `/api/market/trades/export?${params}`;
   }
   return (
@@ -271,15 +374,13 @@ export function MarketAnalyzer() {
       {result && windowData ? (
         <>
           <AnalysisReportPanel
-            analysisId={result.analysisId}
             summary={result.reportSummary}
             currentReport={currentReport}
             collectedReports={collectedReports}
-            reportLoading={reportLoading}
             onDownloadBundle={downloadReportBundle}
+            onDownloadCurrentReport={downloadCurrentReport}
             onClearReports={() => {
               setCollectedReports([]);
-              setCurrentReport(null);
             }}
           />
           <QualityPanel result={result} />
@@ -312,7 +413,10 @@ export function MarketAnalyzer() {
             <div className="panel-heading chart-heading">
               <div>
                 <p className="eyebrow">Windowed chart inspection</p>
-                <h2>{result.meta.symbol} · {timeframe}</h2>
+                <h2>
+                  {result.meta.symbol} · {timeframe}
+                  {requestedTimeframe ? ` → loading ${requestedTimeframe}` : ""}
+                </h2>
               </div>
               <div className="actions export-actions">
                 <a className="button-link" href={exportUrl("csv")}>Export {timeframe} behaviour CSV</a>
@@ -328,8 +432,9 @@ export function MarketAnalyzer() {
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={item === timeframe}
-                    className={item === timeframe ? "active" : ""}
+                    aria-selected={item === (requestedTimeframe ?? timeframe)}
+                    aria-busy={loadingWindow && item === requestedTimeframe}
+                    className={item === (requestedTimeframe ?? timeframe) ? "active" : ""}
                     key={item}
                     disabled={loadingWindow}
                     onClick={() => selectTimeframe(item)}
@@ -355,20 +460,24 @@ export function MarketAnalyzer() {
 
             <div className="marker-toolbar">
               <div className="marker-summary">
-                <strong>Chart signal markers</strong>
-                <span>{windowData.signalMarkers.length.toLocaleString()} events in loaded window</span>
+                <strong>Medium-accuracy trade markers</strong>
+                <span>{windowData.signalMarkers.length.toLocaleString()} deduplicated A/B signals · {windowData.researchSignalMarkers.length.toLocaleString()} research events</span>
               </div>
               <label className="toggle-control">
-                <input type="checkbox" checked={showConfirmedSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowConfirmedSignals(event.target.checked)} />
-                Confirmed BUY/SELL
+                <input type="checkbox" checked={showGradeA} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowGradeA(event.target.checked)} />
+                Grade A signals
               </label>
               <label className="toggle-control">
-                <input type="checkbox" checked={showContinuationSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowContinuationSignals(event.target.checked)} />
-                Continuations
+                <input type="checkbox" checked={showGradeB} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowGradeB(event.target.checked)} />
+                Grade B signals
               </label>
               <label className="toggle-control">
-                <input type="checkbox" checked={showInvalidations} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowInvalidations(event.target.checked)} />
-                Invalidations
+                <input type="checkbox" checked={showResearchSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowResearchSignals(event.target.checked)} />
+                Phase 6 research markers
+              </label>
+              <label className="toggle-control">
+                <input type="checkbox" checked={showInvalidations} disabled={!showResearchSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowInvalidations(event.target.checked)} />
+                Research invalidations
               </label>
               <label className="toggle-control">
                 <input type="checkbox" checked={showTradeLevels} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowTradeLevels(event.target.checked)} />
@@ -376,15 +485,17 @@ export function MarketAnalyzer() {
               </label>
               <div className="actions marker-actions">
                 <button type="button" className="secondary" onClick={() => {
-                  setShowConfirmedSignals(true);
-                  setShowContinuationSignals(true);
+                  setShowGradeA(true);
+                  setShowGradeB(true);
+                  setShowResearchSignals(true);
                   setShowInvalidations(true);
-                }}>Show all signals</button>
+                }}>Show research mode</button>
                 <button type="button" className="secondary" onClick={() => {
-                  setShowConfirmedSignals(false);
-                  setShowContinuationSignals(false);
+                  setShowGradeA(true);
+                  setShowGradeB(true);
+                  setShowResearchSignals(false);
                   setShowInvalidations(false);
-                }}>Hide signals</button>
+                }}>Trading view</button>
               </div>
             </div>
 
@@ -428,13 +539,18 @@ export function MarketAnalyzer() {
 
             <p className="form-note window-note">
               Loaded {windowData.candles.length.toLocaleString()} candles from server offset {windowData.offset.toLocaleString()}. Full 100K datasets are never pushed into React state at once.
+              {windowData.recoveredFromSource
+                ? " Vercel memory was unavailable, so this timeframe was rebuilt from Finage and is now cached in this browser tab."
+                : " This timeframe was served without a serverless rebuild."}
             </p>
             <MarketChart
               candles={windowData.candles}
               signalMarkers={windowData.signalMarkers}
+              researchSignalMarkers={windowData.researchSignalMarkers}
               tradePlan={windowData.tradePlanAtWindowEnd ?? result.latestTradePlan}
-              showConfirmedSignals={showConfirmedSignals}
-              showContinuationSignals={showContinuationSignals}
+              showGradeA={showGradeA}
+              showGradeB={showGradeB}
+              showResearchSignals={showResearchSignals}
               showInvalidations={showInvalidations}
               showTradeLevels={showTradeLevels}
             />

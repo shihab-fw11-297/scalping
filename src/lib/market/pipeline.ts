@@ -1,19 +1,40 @@
 import { fetchFinageM1AggregateResponse } from "@/lib/finage/client";
 import { aggregateAllTimeframes, calculateLatestRollingWindow } from "./aggregate";
+import { createVisibleRanges, sliceVisibleDataset } from "./analysis-range";
 import { analysisCache } from "./analysis-cache";
 import { summarizeCandleBehaviour } from "./behaviour";
+import { cleanMarketCandles, createM1CompletenessWithGapSafety } from "./data-cleaning";
 import { summarizePriceBehaviour } from "./price-behaviour";
-import { createAnalysisReportSummary } from "./report";
-import { DEFAULT_TRADE_MANAGEMENT_SETTINGS, getOrCreateTradeManagementIndex } from "./trade-management";
+import { createAnalysisReport, createAnalysisReportSummary } from "./report";
+import {
+  DEFAULT_TRADE_MANAGEMENT_SETTINGS,
+  analyzeTradeManagementAt,
+  getOrCreateTradeManagementIndex,
+  summarizeTradeManagementRange,
+} from "./trade-management";
 import { planFinageDateChunks } from "./chunk-plan";
 import { mapWithConcurrency } from "./concurrency";
 import { ALL_TIMEFRAMES } from "./constants";
 import { getServerEnv } from "./env";
 import { describeDailyBoundary, type WeekendSchedule } from "./market-session";
+import {
+  analyzeMultiTimeframeStateAt,
+  summarizeMultiTimeframeStates,
+} from "./multi-timeframe-state";
+import {
+  analyzeHypothesesAndOpportunitiesAt,
+  summarizeHypothesesAndOpportunities,
+} from "./hypothesis-opportunity";
+import {
+  analyzeSignalDecisionAt,
+  asHypothesisOpportunityIndex,
+  summarizeSignalDecisionRange,
+} from "./signal-decision";
 import { detectGaps } from "./gaps";
 import { dedupeSortedCandles, normalizeFinageAggregates } from "./normalize";
 import type {
   AnalyzeMarketResponse,
+  AnalysisRecoveryRequest,
   CandleCompleteness,
   CandleCoverageStatus,
   CompactCandle,
@@ -21,6 +42,7 @@ import type {
   Timeframe,
   TimeframeDataset,
   TimeframeMeta,
+  VisibleDatasetRange,
 } from "./types";
 import { createMarketWindow } from "./window";
 
@@ -64,14 +86,32 @@ function countCoverageStatuses(
 function createTimeframeMeta(
   timeframe: Timeframe,
   dataset: TimeframeDataset,
+  visibleRange?: VisibleDatasetRange,
 ): TimeframeMeta {
+  const start = visibleRange?.start ?? 0;
+  const end = visibleRange?.end ?? dataset.candles.length;
+  const visibleDataset: TimeframeDataset = {
+    candles: dataset.candles.slice(start, end),
+    completeness: dataset.completeness.slice(start, end),
+  };
   return {
     timeframe,
-    candleCount: dataset.candles.length,
-    firstTimestampMs: dataset.candles[0]?.[0] ?? null,
-    lastTimestampMs: dataset.candles.at(-1)?.[0] ?? null,
-    incompleteCandles: countIncomplete(dataset),
+    candleCount: visibleDataset.candles.length,
+    firstTimestampMs: visibleDataset.candles[0]?.[0] ?? null,
+    lastTimestampMs: visibleDataset.candles.at(-1)?.[0] ?? null,
+    incompleteCandles: countIncomplete(visibleDataset),
   };
+}
+
+function resolveWarmupCalendarDays(
+  requestedDays: number,
+  configuredDays: number,
+  maximumCandles: number,
+): number {
+  const estimatedSelectedTradableCandles = requestedDays * 1_440 * (5 / 7);
+  const remainingCapacity = Math.max(0, maximumCandles - estimatedSelectedTradableCandles);
+  const capacityDays = Math.max(0, Math.floor(remainingCapacity / (1_440 * (5 / 7))));
+  return Math.min(configuredDays, capacityDays);
 }
 
 function createWeekendSchedule(env: ReturnType<typeof getServerEnv>): WeekendSchedule {
@@ -110,8 +150,15 @@ export async function analyzeHistoricalMarket(
     throw new Error("The current release supports a maximum range of 120 calendar days.");
   }
 
+  const warmupCalendarDays = resolveWarmupCalendarDays(
+    calendarDays,
+    env.ANALYSIS_WARMUP_CALENDAR_DAYS,
+    env.APP_MAX_CANDLES,
+  );
+  const contextFromTimestampMs = fromTimestampMs - warmupCalendarDays * 86_400_000;
+
   const chunks = planFinageDateChunks({
-    fromTimestampMs,
+    fromTimestampMs: contextFromTimestampMs,
     toTimestampMs,
     multiplierMinutes: 1,
     targetMaxResults: env.FINAGE_MAX_RESULTS_PER_REQUEST,
@@ -159,7 +206,7 @@ export async function analyzeHistoricalMarket(
     received += rawChunk.length;
     const normalized = normalizeFinageAggregates(
       rawChunk,
-      fromTimestampMs,
+      contextFromTimestampMs,
       toTimestampMs,
     );
     normalizedChunks.push(normalized.candles);
@@ -179,13 +226,17 @@ export async function analyzeHistoricalMarket(
     issues.push(...deduped.conflictIssues.slice(0, 100 - issues.length));
   }
 
-  if (deduped.candles.length > env.APP_MAX_CANDLES) {
+  const weekendSchedule = createWeekendSchedule(env);
+  const cleaned = cleanMarketCandles(deduped.candles, weekendSchedule);
+  if (issues.length < 100) issues.push(...cleaned.issues.slice(0, 100 - issues.length));
+
+  if (cleaned.candles.length > env.APP_MAX_CANDLES) {
     throw new Error(
-      `The selected range returned ${deduped.candles.length.toLocaleString()} candles. ` +
+      `The selected range plus automatic warm-up returned ${cleaned.candles.length.toLocaleString()} candles. ` +
         `Reduce it to ${env.APP_MAX_CANDLES.toLocaleString()} candles or fewer.`,
     );
   }
-  if (deduped.candles.length === 0) {
+  if (cleaned.candles.length === 0) {
     throw new Error(
       `Finage returned no valid XAUUSD M1 candles for the selected interval. ` +
         `Provider records=${received}, outside exact range=${filteredOutsideRange}, ` +
@@ -194,77 +245,99 @@ export async function analyzeHistoricalMarket(
     );
   }
 
-  const weekendSchedule = createWeekendSchedule(env);
-  const gapResult = detectGaps(deduped.candles, 60_000, weekendSchedule);
-  const derived = aggregateAllTimeframes(deduped.candles, {
-    requestFromMs: fromTimestampMs,
+  const gapResult = detectGaps(cleaned.candles, 60_000, weekendSchedule);
+  const m1CompletenessResult = createM1CompletenessWithGapSafety(
+    cleaned.candles,
+    gapResult.gaps,
+  );
+  const derived = aggregateAllTimeframes(cleaned.candles, {
+    requestFromMs: contextFromTimestampMs,
     requestToMs: toTimestampMs,
     weekendSchedule,
     dailyBoundaryMode: env.DAILY_BOUNDARY_MODE,
+    m1Completeness: m1CompletenessResult.completeness,
   });
-  const m1Completeness: CandleCompleteness[] = Array.from(
-    { length: deduped.candles.length },
-    () => ({
-      actualChildren: 1,
-      expectedChildren: 1,
-      fullIntervalChildren: 1,
-      expectedClosedChildren: 0,
-      completenessPercent: 100,
-      status: "COMPLETE" as const,
-    }),
-  );
 
   const datasets: Record<Timeframe, TimeframeDataset> = {
-    M1: { candles: deduped.candles, completeness: m1Completeness },
+    M1: { candles: cleaned.candles, completeness: m1CompletenessResult.completeness },
     M5: derived.M5,
     M15: derived.M15,
     H1: derived.H1,
     D1: derived.D1,
   };
 
-  const rolling5hLatest = calculateLatestRollingWindow(deduped.candles, 300);
+  const visibleRanges = createVisibleRanges(datasets, fromTimestampMs, toTimestampMs);
+  const selectedDatasets = Object.fromEntries(
+    ALL_TIMEFRAMES.map((timeframe) => [
+      timeframe,
+      sliceVisibleDataset(datasets[timeframe], visibleRanges[timeframe]),
+    ]),
+  ) as Record<Timeframe, TimeframeDataset>;
+
+  const rolling5hLatest = calculateLatestRollingWindow(cleaned.candles, 300);
   const behaviourSummaries = {
-    M1: summarizeCandleBehaviour(datasets.M1.candles),
-    M5: summarizeCandleBehaviour(datasets.M5.candles),
-    M15: summarizeCandleBehaviour(datasets.M15.candles),
-    H1: summarizeCandleBehaviour(datasets.H1.candles),
-    D1: summarizeCandleBehaviour(datasets.D1.candles),
+    M1: summarizeCandleBehaviour(selectedDatasets.M1.candles),
+    M5: summarizeCandleBehaviour(selectedDatasets.M5.candles),
+    M15: summarizeCandleBehaviour(selectedDatasets.M15.candles),
+    H1: summarizeCandleBehaviour(selectedDatasets.H1.candles),
+    D1: summarizeCandleBehaviour(selectedDatasets.D1.candles),
   };
   const priceBehaviourSummaries = {
-    M1: summarizePriceBehaviour(datasets.M1.candles),
-    M5: summarizePriceBehaviour(datasets.M5.candles),
-    M15: summarizePriceBehaviour(datasets.M15.candles),
-    H1: summarizePriceBehaviour(datasets.H1.candles),
-    D1: summarizePriceBehaviour(datasets.D1.candles),
+    M1: summarizePriceBehaviour(selectedDatasets.M1.candles),
+    M5: summarizePriceBehaviour(selectedDatasets.M5.candles),
+    M15: summarizePriceBehaviour(selectedDatasets.M15.candles),
+    H1: summarizePriceBehaviour(selectedDatasets.H1.candles),
+    D1: summarizePriceBehaviour(selectedDatasets.D1.candles),
   };
   const tradeManagementIndex = getOrCreateTradeManagementIndex(datasets, {
     dailyBoundaryMode: env.DAILY_BOUNDARY_MODE,
     settings: tradeManagementSettings,
   });
   const signalDecisionIndex = tradeManagementIndex.signalIndex;
+  const rangedMarketState = summarizeMultiTimeframeStates(
+    signalDecisionIndex.stateIndex,
+    undefined,
+    fromTimestampMs,
+    toTimestampMs,
+  );
+  const rangedHypothesis = summarizeHypothesesAndOpportunities(
+    asHypothesisOpportunityIndex(signalDecisionIndex),
+    undefined,
+    fromTimestampMs,
+    toTimestampMs,
+  );
   const marketStateResult = {
-    summary: signalDecisionIndex.marketStateSummary,
-    latest: signalDecisionIndex.latestMarketState,
+    summary: rangedMarketState.summary,
+    latest: analyzeMultiTimeframeStateAt(signalDecisionIndex.stateIndex, toTimestampMs),
   };
   const hypothesisOpportunityResult = {
-    summary: signalDecisionIndex.hypothesisOpportunitySummary,
-    latest: signalDecisionIndex.latestHypothesisOpportunity,
+    summary: rangedHypothesis.summary,
+    latest: analyzeHypothesesAndOpportunitiesAt(
+      asHypothesisOpportunityIndex(signalDecisionIndex),
+      toTimestampMs,
+    ),
   };
   const signalDecisionResult = {
-    summary: signalDecisionIndex.summary,
-    latest: signalDecisionIndex.latest,
+    summary: summarizeSignalDecisionRange(signalDecisionIndex, fromTimestampMs, toTimestampMs),
+    latest: analyzeSignalDecisionAt(signalDecisionIndex, toTimestampMs),
   };
   const tradeManagementResult = {
-    summary: tradeManagementIndex.summary,
-    latest: tradeManagementIndex.latest,
+    summary: summarizeTradeManagementRange(tradeManagementIndex, fromTimestampMs, toTimestampMs),
+    latest: analyzeTradeManagementAt(tradeManagementIndex, toTimestampMs),
   };
 
   const incompleteByTimeframe = Object.fromEntries(
-    ALL_TIMEFRAMES.map((timeframe) => [timeframe, countIncomplete(datasets[timeframe])]),
+    ALL_TIMEFRAMES.map((timeframe) => [timeframe, countIncomplete(selectedDatasets[timeframe])]),
   ) as Record<Timeframe, number>;
   const coverageStatusByTimeframe = Object.fromEntries(
-    ALL_TIMEFRAMES.map((timeframe) => [timeframe, countCoverageStatuses(datasets[timeframe])]),
+    ALL_TIMEFRAMES.map((timeframe) => [timeframe, countCoverageStatuses(selectedDatasets[timeframe])]),
   ) as Record<Timeframe, Record<CandleCoverageStatus, number>>;
+
+  const selectedGaps = gapResult.gaps.filter(
+    (gap) => gap.toTimestampMs >= fromTimestampMs && gap.fromTimestampMs < toTimestampMs,
+  );
+  const selectedMissingTradable = selectedGaps.reduce((sum, gap) => sum + gap.missingTradableCandles, 0);
+  const selectedExpectedClosed = selectedGaps.reduce((sum, gap) => sum + gap.expectedClosedCandles, 0);
 
   const processingMs = Math.round((performance.now() - startedAt) * 100) / 100;
   const ttlMs = env.ANALYSIS_CACHE_TTL_MINUTES * 60_000;
@@ -274,6 +347,10 @@ export async function analyzeHistoricalMarket(
     source: "FINAGE" as const,
     requestedFromUtc: new Date(fromTimestampMs).toISOString(),
     requestedToUtc: new Date(toTimestampMs).toISOString(),
+    contextFromUtc: new Date(contextFromTimestampMs).toISOString(),
+    warmupCalendarDays,
+    warmupCandleCount: visibleRanges.M1.start,
+    analysisProfile: "MEDIUM_ACCURACY_V1" as const,
     intervalSemantics: "[from,to)" as const,
     sourceTimeframe: "M1" as const,
     fetchChunks: chunks.length,
@@ -287,24 +364,30 @@ export async function analyzeHistoricalMarket(
   };
   const quality = {
     received,
-    valid: deduped.candles.length,
+    valid: visibleRanges.M1.total,
+    contextValid: cleaned.candles.length,
+    warmupCandles: visibleRanges.M1.start,
     invalid: invalidRecords,
     filteredOutsideRange,
     duplicates: deduped.duplicates,
     duplicateConflicts: deduped.duplicateConflicts,
     outOfOrderDetected,
-    missingTradableCandles: gapResult.missingTradableCandles,
-    expectedClosedCandles: gapResult.expectedClosedCandles,
-    gapCount: gapResult.gaps.length,
+    closedMarketCandlesRemoved: cleaned.closedMarketCandlesRemoved,
+    staleCandlesRemoved: cleaned.staleCandlesRemoved,
+    gapSafetyCandlesMarked: m1CompletenessResult.markedSafetyCandles,
+    missingTradableCandles: selectedMissingTradable,
+    expectedClosedCandles: selectedExpectedClosed,
+    gapCount: selectedGaps.length,
     incompleteByTimeframe,
     coverageStatusByTimeframe,
     issueSamples: issues.slice(0, 25),
-    gapSamples: gapResult.gaps.slice(0, 50),
+    gapSamples: selectedGaps.slice(0, 50),
   };
   const reportSummary = createAnalysisReportSummary({
     meta,
     quality,
     datasets,
+    visibleRanges,
     marketStateSummary: marketStateResult.summary,
     latestMarketState: marketStateResult.latest,
     hypothesisOpportunitySummary: hypothesisOpportunityResult.summary,
@@ -320,6 +403,7 @@ export async function analyzeHistoricalMarket(
       meta,
       quality,
       datasets,
+      visibleRanges,
       behaviourSummaries,
       priceBehaviourSummaries,
       marketStateSummary: marketStateResult.summary,
@@ -343,16 +427,26 @@ export async function analyzeHistoricalMarket(
   const timeframes = Object.fromEntries(
     ALL_TIMEFRAMES.map((timeframe) => [
       timeframe,
-      createTimeframeMeta(timeframe, datasets[timeframe]),
+      createTimeframeMeta(timeframe, datasets[timeframe], visibleRanges[timeframe]),
     ]),
   ) as Record<Timeframe, TimeframeMeta>;
 
-  const initialTimeframe: Timeframe = datasets.M1.candles.length > 25_000 ? "M15" : "M5";
+  const initialTimeframe: Timeframe = visibleRanges.M1.total > 25_000 ? "M15" : "M5";
   const initialLimit = 2_000;
-  const initialOffset = Math.max(0, datasets[initialTimeframe].candles.length - initialLimit);
+  const initialOffset = Math.max(0, visibleRanges[initialTimeframe].total - initialLimit);
+  const recoveryRequest: AnalysisRecoveryRequest = {
+    fromUtc: meta.requestedFromUtc,
+    toUtc: meta.requestedToUtc,
+    assumedSpreadPrice: tradeManagementSettings.assumedSpreadPrice,
+    assumedSlippagePrice: tradeManagementSettings.assumedSlippagePrice,
+    minimumRiskReward: tradeManagementSettings.minimumRiskReward,
+    maximumRiskInAverageRanges: tradeManagementSettings.maximumRiskInAverageRanges,
+  };
+  const completeReport = createAnalysisReport(cached);
 
   return {
     analysisId: cached.id,
+    recoveryRequest,
     meta,
     quality,
     timeframes,
@@ -367,6 +461,7 @@ export async function analyzeHistoricalMarket(
     tradeManagementSummary: tradeManagementResult.summary,
     latestTradePlan: tradeManagementResult.latest,
     reportSummary,
+    completeReport,
     rolling5hLatest,
     initialWindow: createMarketWindow(
       cached,

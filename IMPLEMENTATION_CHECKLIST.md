@@ -338,3 +338,36 @@
 - [x] Reduced-motion preference support
 - [x] Dependency-free responsive verification command
 - [x] Chromium viewport audit recorded in JSON
+
+## Vercel serverless report/timeframe correction
+
+- [x] Complete report generated inside `/api/market/analyze`
+- [x] Complete report embedded in `AnalyzeMarketResponse`
+- [x] Client-side JSON/Markdown report downloads
+- [x] No mandatory second report request after fetch
+- [x] Validated analysis recovery descriptor
+- [x] Window cache miss rebuild from Finage
+- [x] Recovery support for report/export/state/opportunity/signal/trade routes
+- [x] Browser cache for loaded timeframe windows
+- [x] Stale timeframe response suppression
+- [x] Visible timeframe loading state
+- [x] Visible serverless recovery state
+- [x] Specific JSON recovery failure message
+- [x] Static serverless route audit
+- [x] Injected cache-miss recovery test
+
+## Medium Accuracy V1
+
+- [x] Automatic prior-context warm-up
+- [x] Closed-market provider candle removal
+- [x] Conservative stale-quote removal
+- [x] Gap-adjacent safety blocking
+- [x] Soft/medium/hard obstacle hierarchy
+- [x] Independent A/B/C trade-quality grading
+- [x] Timeframe Rotation changed to context-only
+- [x] Multi-family market-episode deduplication
+- [x] Default A/B-only chart markers
+- [x] Optional research markers
+- [x] Medium-accuracy report diagnostics
+- [x] Deterministic and regression verification
+- [ ] Real-market A/B calibration after resolved Finage samples

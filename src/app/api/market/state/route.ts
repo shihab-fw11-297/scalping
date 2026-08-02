@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { analysisCache } from "@/lib/market/analysis-cache";
+import { resolveAnalysis } from "@/lib/market/analysis-recovery";
+import { ANALYSIS_RECOVERY_QUERY_SHAPE } from "@/lib/market/analysis-recovery-schema";
 import {
   analyzeMultiTimeframeStateAt,
   getOrCreateMultiTimeframeStateIndex,
@@ -7,10 +8,12 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const querySchema = z.object({
   analysisId: z.string().uuid(),
   timestampMs: z.coerce.number().int().positive().optional(),
+  ...ANALYSIS_RECOVERY_QUERY_SHAPE,
 });
 
 export async function GET(request: Request): Promise<Response> {
@@ -23,13 +26,14 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
 
-  const analysis = analysisCache.get(parsed.data.analysisId);
-  if (!analysis) {
+  const resolved = await resolveAnalysis(parsed.data);
+  if (!resolved) {
     return Response.json(
-      { error: "Analysis expired or was not found. Run the analysis again." },
+      { error: "Analysis was not found and no recovery parameters were supplied." },
       { status: 410 },
     );
   }
+  const analysis = resolved.analysis;
 
   const anchorTimestampMs = parsed.data.timestampMs ?? Date.parse(analysis.meta.requestedToUtc);
   const state = analyzeMultiTimeframeStateAt(
@@ -53,6 +57,6 @@ export async function GET(request: Request): Promise<Response> {
       state,
       semantics: "Every higher-timeframe layer uses only candles closed by the synchronized M1 anchor.",
     },
-    { headers: { "Cache-Control": "no-store" } },
+    { headers: { "Cache-Control": "no-store", "X-Analysis-Recovered": resolved.recovered ? "true" : "false" } },
   );
 }

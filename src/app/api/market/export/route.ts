@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { analysisCache } from "@/lib/market/analysis-cache";
+import { resolveAnalysis } from "@/lib/market/analysis-recovery";
+import { ANALYSIS_RECOVERY_QUERY_SHAPE } from "@/lib/market/analysis-recovery-schema";
 import { analyzeCandleBehaviourWindow } from "@/lib/market/behaviour";
 import { analyzePriceBehaviourWindow } from "@/lib/market/price-behaviour";
 import type {
@@ -16,6 +17,7 @@ const querySchema = z.object({
   analysisId: z.string().uuid(),
   timeframe: z.enum(["M1", "M5", "M15", "H1", "D1"]),
   format: z.enum(["csv", "json"]).default("csv"),
+  ...ANALYSIS_RECOVERY_QUERY_SHAPE,
 });
 
 function csvEscape(value: unknown): string {
@@ -207,13 +209,14 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "Invalid export request." }, { status: 400 });
   }
 
-  const analysis = analysisCache.get(parsed.data.analysisId);
-  if (!analysis) {
+  const resolved = await resolveAnalysis(parsed.data);
+  if (!resolved) {
     return Response.json(
-      { error: "Analysis expired or was not found. Run the analysis again." },
+      { error: "Analysis was not found and no recovery parameters were supplied." },
       { status: 410 },
     );
   }
+  const analysis = resolved.analysis;
 
   const timeframe = parsed.data.timeframe as Timeframe;
   const dataset = analysis.datasets[timeframe];
@@ -246,6 +249,7 @@ export async function GET(request: Request): Promise<Response> {
           "Content-Type": "application/json; charset=utf-8",
           "Content-Disposition": `attachment; filename="${filename}.json"`,
           "Cache-Control": "no-store",
+          "X-Analysis-Recovered": resolved.recovered ? "true" : "false",
         },
       },
     );
@@ -256,6 +260,7 @@ export async function GET(request: Request): Promise<Response> {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename}.csv"`,
       "Cache-Control": "no-store",
+      "X-Analysis-Recovered": resolved.recovered ? "true" : "false",
     },
   });
 }

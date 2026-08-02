@@ -35,6 +35,15 @@ export interface TimeframeDataset {
   completeness: CandleCompleteness[];
 }
 
+export interface VisibleDatasetRange {
+  /** Absolute index in the internally warmed-up dataset. */
+  start: number;
+  /** Exclusive absolute index in the internally warmed-up dataset. */
+  end: number;
+  /** Number of candles visible inside the user-requested interval. */
+  total: number;
+}
+
 export interface FinageRawAggregate {
   o: number;
   h: number;
@@ -50,7 +59,9 @@ export interface DataIssue {
     | "INVALID_NUMBER"
     | "INVALID_OHLC"
     | "OUT_OF_RANGE"
-    | "DUPLICATE_CONFLICT";
+    | "DUPLICATE_CONFLICT"
+    | "EXPECTED_CLOSURE_CANDLE"
+    | "STALE_PROVIDER_CANDLE";
   index: number;
   message: string;
 }
@@ -86,11 +97,16 @@ export interface RollingWindowSnapshot {
 export interface QualityReport {
   received: number;
   valid: number;
+  contextValid: number;
+  warmupCandles: number;
   invalid: number;
   filteredOutsideRange: number;
   duplicates: number;
   duplicateConflicts: number;
   outOfOrderDetected: boolean;
+  closedMarketCandlesRemoved: number;
+  staleCandlesRemoved: number;
+  gapSafetyCandlesMarked: number;
   missingTradableCandles: number;
   expectedClosedCandles: number;
   gapCount: number;
@@ -326,6 +342,7 @@ export interface TimeframeMeta {
 
 export interface MarketWindowResponse {
   analysisId: string;
+  recoveredFromSource: boolean;
   timeframe: Timeframe;
   offset: number;
   limit: number;
@@ -334,7 +351,10 @@ export interface MarketWindowResponse {
   completeness: CandleCompleteness[];
   behaviours: CandleBehaviourView[];
   priceBehaviours: PriceBehaviourView[];
+  /** Deduplicated A/B trade-ready markers shown by default. */
   signalMarkers: ChartSignalMarker[];
+  /** Phase 6 pattern events retained for optional research inspection. */
+  researchSignalMarkers: ChartSignalMarker[];
   marketStateAtWindowEnd: MultiTimeframeStateSnapshot | null;
   hypothesisOpportunityAtWindowEnd: HypothesisOpportunitySnapshot | null;
   signalDecisionAtWindowEnd: SignalDecisionSnapshot | null;
@@ -346,6 +366,10 @@ export interface AnalyzeMarketMeta {
   source: "FINAGE";
   requestedFromUtc: string;
   requestedToUtc: string;
+  contextFromUtc: string;
+  warmupCalendarDays: number;
+  warmupCandleCount: number;
+  analysisProfile: "MEDIUM_ACCURACY_V1";
   intervalSemantics: "[from,to)";
   sourceTimeframe: "M1";
   fetchChunks: number;
@@ -358,8 +382,18 @@ export interface AnalyzeMarketMeta {
   tradeManagementSettings: TradeManagementSettings;
 }
 
+export interface AnalysisRecoveryRequest {
+  fromUtc: string;
+  toUtc: string;
+  assumedSpreadPrice: number;
+  assumedSlippagePrice: number;
+  minimumRiskReward: number;
+  maximumRiskInAverageRanges: number;
+}
+
 export interface AnalyzeMarketResponse {
   analysisId: string;
+  recoveryRequest: AnalysisRecoveryRequest;
   meta: AnalyzeMarketMeta;
   quality: QualityReport;
   timeframes: Record<Timeframe, TimeframeMeta>;
@@ -374,6 +408,7 @@ export interface AnalyzeMarketResponse {
   tradeManagementSummary: TradeManagementSummary;
   latestTradePlan: TradePlanSnapshot | null;
   reportSummary: AnalysisReportSummary;
+  completeReport: AnalysisReport;
   rolling5hLatest: RollingWindowSnapshot | null;
   initialWindow: MarketWindowResponse;
 }
@@ -385,6 +420,7 @@ export interface CachedAnalysis {
   meta: AnalyzeMarketMeta;
   quality: QualityReport;
   datasets: Record<Timeframe, TimeframeDataset>;
+  visibleRanges: Record<Timeframe, VisibleDatasetRange>;
   behaviourSummaries: Record<Timeframe, CandleBehaviourSummary>;
   priceBehaviourSummaries: Record<Timeframe, PriceBehaviourSummary>;
   marketStateSummary: MultiTimeframeStateSummary;
@@ -972,7 +1008,10 @@ export type TradePlanRejectionCode =
   | "SIGNAL_EXPIRED"
   | "STRUCTURE_INVALIDATED"
   | "INTRABAR_SEQUENCE_UNKNOWN"
-  | "SUPERSEDED_BY_NEW_SIGNAL";
+  | "SUPERSEDED_BY_NEW_SIGNAL"
+  | "QUALITY_BELOW_MEDIUM"
+  | "TIMEFRAME_ROTATION_CONTEXT_ONLY"
+  | "DUPLICATE_MARKET_EPISODE";
 
 export type TradePlanLimitationCode =
   | "HISTORICAL_OHLC_ONLY"
@@ -1009,6 +1048,31 @@ export type TargetLevelSource =
   | "EXPECTED_10M_CAPACITY"
   | "EXPANSION";
 
+export type ObstacleClass = "SOFT" | "MEDIUM" | "HARD";
+
+export type TradeQualityGrade = "A" | "B" | "C" | "BLOCKED";
+
+export interface TradeQualityComponents {
+  pattern: number;
+  regime: number;
+  location: number;
+  alignment: number;
+  timing: number;
+  target: number;
+  session: number;
+}
+
+export interface TradeQualityAssessment {
+  score: number;
+  grade: TradeQualityGrade;
+  tradeReady: boolean;
+  session: import("./trading-session").XauTradingSession;
+  components: TradeQualityComponents;
+  positiveReasons: string[];
+  negativeReasons: string[];
+  semantics: "MEDIUM_ACCURACY_SCORE_NOT_PROFITABILITY_PROOF";
+}
+
 export interface TradeTarget {
   name: "TP1" | "TP2" | "TP3";
   price: number;
@@ -1020,7 +1084,15 @@ export interface TradeTarget {
 export interface TargetSpacePlan {
   nearestObstaclePrice: number | null;
   nearestObstacleSource: Exclude<TargetLevelSource, "R_MULTIPLE" | "EXPECTED_10M_CAPACITY" | "EXPANSION"> | null;
+  nearestObstacleClass: ObstacleClass | null;
   obstacleDistance: number | null;
+  decisionObstaclePrice: number | null;
+  decisionObstacleSource: Exclude<TargetLevelSource, "R_MULTIPLE" | "EXPECTED_10M_CAPACITY" | "EXPANSION"> | null;
+  decisionObstacleClass: Exclude<ObstacleClass, "SOFT"> | null;
+  decisionObstacleDistance: number | null;
+  softObstacleCount: number;
+  mediumObstacleCount: number;
+  hardObstacleCount: number;
   expected10MinuteCapacity: number;
   limitingFactor: "HISTORICAL_OBSTACLE" | "EXPECTED_10M_CAPACITY";
   obstacleCandidatesEvaluated: number;
@@ -1064,6 +1136,7 @@ export interface TradePlanSnapshot {
   entryZone: EntryZone | null;
   structuralRisk: StructuralRiskPlan | null;
   targetSpace: TargetSpacePlan | null;
+  quality: TradeQualityAssessment | null;
   expectedMovement: ExpectedMovementPlan | null;
   filledExecution: FilledExecutionMetrics | null;
   executionCosts: ExecutionCostAssumption;
@@ -1094,6 +1167,10 @@ export interface TradePlanEvent {
   tp2Price: number | null;
   candidateScore: number;
   riskRewardToTp1: number;
+  qualityScore: number;
+  qualityGrade: TradeQualityGrade;
+  tradeReady: boolean;
+  marketEpisodeId: string;
 }
 
 export interface TradeManagementSummary {
@@ -1108,6 +1185,10 @@ export interface TradeManagementSummary {
   tp1HitCount: number;
   tp2HitCount: number;
   completedPlanCount: number;
+  tradeReadySignalCount: number;
+  gradeCounts: Record<TradeQualityGrade, number>;
+  averageQualityScore: number;
+  duplicateEpisodeCount: number;
   statusCounts: Record<TradePlanStatus, number>;
   rejectionReasonCounts: Record<TradePlanRejectionCode, number>;
   limitationCounts: Record<TradePlanLimitationCode, number>;
@@ -1128,6 +1209,7 @@ export interface TradePlanHistoryItem extends TradePlanEvent {
   entryZone: EntryZone;
   structuralRisk: StructuralRiskPlan;
   targetSpace: TargetSpacePlan;
+  quality: TradeQualityAssessment;
   expectedMovement: ExpectedMovementPlan;
   filledExecution: FilledExecutionMetrics | null;
   executionCosts: ExecutionCostAssumption;
@@ -1155,6 +1237,9 @@ export interface ChartSignalMarker {
   score: number;
   referencePrice: number;
   label: string;
+  markerKind?: "TRADE_READY" | "RESEARCH";
+  grade?: TradeQualityGrade;
+  planStatus?: TradePlanStatus;
 }
 
 export interface AnalysisReportTopCount {
@@ -1172,9 +1257,14 @@ export interface AnalysisReportSummary {
   dataQuality: {
     received: number;
     validM1Candles: number;
+    contextM1Candles: number;
+    warmupM1Candles: number;
     invalidRecords: number;
     duplicates: number;
     duplicateConflicts: number;
+    closedMarketCandlesRemoved: number;
+    staleCandlesRemoved: number;
+    gapSafetyCandlesMarked: number;
     missingTradableCandles: number;
     expectedClosedCandles: number;
     gapCount: number;
@@ -1213,6 +1303,13 @@ export interface AnalysisReportSummary {
     tp1Hit: number;
     tp2Hit: number;
     completed: number;
+    tradeReadySignals: number;
+    gradeA: number;
+    gradeB: number;
+    gradeC: number;
+    blockedGrade: number;
+    averageQualityScore: number;
+    duplicateEpisodesSuppressed: number;
     averageRiskDistance: number;
     averageTp1RiskReward: number;
     averageBarsToEntry: number;
@@ -1242,6 +1339,9 @@ export interface AnalysisReportFamilyBreakdown {
   tp1Hit: number;
   completed: number;
   ambiguous: number;
+  gradeA: number;
+  gradeB: number;
+  tradeReady: number;
 }
 
 export interface AnalysisReport {

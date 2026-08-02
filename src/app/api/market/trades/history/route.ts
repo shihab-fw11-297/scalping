@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { analysisCache } from "@/lib/market/analysis-cache";
+import { resolveAnalysis } from "@/lib/market/analysis-recovery";
+import { ANALYSIS_RECOVERY_QUERY_SHAPE } from "@/lib/market/analysis-recovery-schema";
 import {
   createTradePlanHistory,
   getOrCreateTradeManagementIndex,
@@ -7,11 +8,13 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const querySchema = z.object({
   analysisId: z.string().uuid(),
   offset: z.coerce.number().int().nonnegative().default(0),
   limit: z.coerce.number().int().min(1).max(5000).default(100),
+  ...ANALYSIS_RECOVERY_QUERY_SHAPE,
 });
 
 export async function GET(request: Request): Promise<Response> {
@@ -22,13 +25,14 @@ export async function GET(request: Request): Promise<Response> {
       { status: 400 },
     );
   }
-  const analysis = analysisCache.get(parsed.data.analysisId);
-  if (!analysis) {
+  const resolved = await resolveAnalysis(parsed.data);
+  if (!resolved) {
     return Response.json(
-      { error: "Analysis expired or was not found. Run the analysis again." },
+      { error: "Analysis was not found and no recovery parameters were supplied." },
       { status: 410 },
     );
   }
+  const analysis = resolved.analysis;
   const history = createTradePlanHistory(
     getOrCreateTradeManagementIndex(analysis.datasets, {
       dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
@@ -38,5 +42,10 @@ export async function GET(request: Request): Promise<Response> {
     parsed.data.offset,
     parsed.data.limit,
   );
-  return Response.json(history, { headers: { "Cache-Control": "no-store" } });
+  return Response.json(history, {
+    headers: {
+      "Cache-Control": "no-store",
+      "X-Analysis-Recovered": resolved.recovered ? "true" : "false",
+    },
+  });
 }

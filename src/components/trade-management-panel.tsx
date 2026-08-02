@@ -48,7 +48,7 @@ export function TradeManagementPanel({
           <h2>Entry, structural risk and target plan</h2>
         </div>
         <span className={`status-pill ${statusClass(snapshot.status)}`}>
-          {snapshot.action} · {snapshot.status}
+          {snapshot.action} · {snapshot.status} · {snapshot.quality?.grade ?? "—"}
         </span>
       </div>
 
@@ -73,6 +73,8 @@ export function TradeManagementPanel({
         <div className="metric"><span>Current protective stop</span><strong>{price(snapshot.currentProtectiveStopPrice)}</strong></div>
         <div className="metric"><span>Management action</span><strong>{title(snapshot.managementAction)}</strong></div>
         <div className="metric"><span>Qualification</span><strong>{title(snapshot.executionQualification)}</strong></div>
+        <div className="metric"><span>Medium quality</span><strong>{snapshot.quality ? `${snapshot.quality.grade} · ${snapshot.quality.score}` : "—"}</strong></div>
+        <div className="metric"><span>Trading session</span><strong>{snapshot.quality ? title(snapshot.quality.session) : "—"}</strong></div>
         <div className="metric"><span>No-chase price</span><strong>{price(snapshot.entryZone?.noChasePrice)}</strong></div>
         <div className="metric"><span>Expiry</span><strong>{snapshot.entryZone ? new Date(snapshot.entryZone.expiresAtMs).toISOString() : "—"}</strong></div>
       </div>
@@ -94,7 +96,11 @@ export function TradeManagementPanel({
           <strong>Target space</strong>
           <span>Nearest obstacle: {price(snapshot.targetSpace?.nearestObstaclePrice)}</span>
           <span>Obstacle source: {snapshot.targetSpace?.nearestObstacleSource ? title(snapshot.targetSpace.nearestObstacleSource) : "None"}</span>
+          <span>Nearest class: {snapshot.targetSpace?.nearestObstacleClass ?? "None"}</span>
           <span>Obstacle distance: {price(snapshot.targetSpace?.obstacleDistance)}</span>
+          <span>Decision obstacle: {snapshot.targetSpace?.decisionObstacleSource ? title(snapshot.targetSpace.decisionObstacleSource) : "None"}</span>
+          <span>Decision distance: {price(snapshot.targetSpace?.decisionObstacleDistance)}</span>
+          <span>Soft / medium / hard: {snapshot.targetSpace?.softObstacleCount ?? 0} / {snapshot.targetSpace?.mediumObstacleCount ?? 0} / {snapshot.targetSpace?.hardObstacleCount ?? 0}</span>
           <span>Expected 10M capacity: {price(snapshot.targetSpace?.expected10MinuteCapacity)}</span>
           <span>Limiting factor: {snapshot.targetSpace ? title(snapshot.targetSpace.limitingFactor) : "—"}</span>
           <span>Candidates evaluated: {snapshot.targetSpace?.obstacleCandidatesEvaluated ?? 0}</span>
@@ -133,6 +139,24 @@ export function TradeManagementPanel({
         </div>
       </div>
 
+      {snapshot.quality ? (
+        <div className="signal-warning">
+          <strong>Medium Accuracy V1 quality breakdown</strong>
+          <div className="state-distribution-grid">
+            {Object.entries(snapshot.quality.components).map(([component, value]) => (
+              <div key={component}>
+                <strong>{title(component)}</strong>
+                <span>{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="evidence-line">
+            {snapshot.quality.positiveReasons.map((reason) => <i key={reason}>+ {title(reason)}</i>)}
+            {snapshot.quality.negativeReasons.map((reason) => <i className="negative" key={reason}>- {title(reason)}</i>)}
+          </div>
+        </div>
+      ) : null}
+
       {snapshot.rejectionReasons.length > 0 ? (
         <div className="signal-warning">
           <strong>Rejection and invalidation reasons</strong>
@@ -169,6 +193,7 @@ export function TradeManagementPanel({
             <span>Qualified: {summary.qualifiedPlanCount.toLocaleString()}</span>
             <span>Rejected: {summary.rejectedPlanCount.toLocaleString()}</span>
             <span>Entered: {summary.enteredPlanCount.toLocaleString()}</span>
+            <span>Deduplicated A/B: {summary.tradeReadySignalCount.toLocaleString()}</span>
           </div>
           <div>
             <strong>Outcomes</strong>
@@ -183,6 +208,9 @@ export function TradeManagementPanel({
             <span>TP1 R:R: {summary.averageTp1RiskReward}</span>
             <span>Bars to entry: {summary.averageBarsToEntry}</span>
             <span>Execution: candle-data qualification only</span>
+            <span>Quality score: {summary.averageQualityScore}</span>
+            <span>A / B / blocked: {summary.gradeCounts.A} / {summary.gradeCounts.B} / {summary.gradeCounts.BLOCKED}</span>
+            <span>Duplicate episodes: {summary.duplicateEpisodeCount}</span>
           </div>
         </div>
       </details>

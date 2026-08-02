@@ -28,11 +28,16 @@ export function QualityPanel({ result }: QualityPanelProps) {
       <div className="metric-grid">
         <Metric label="Finage records" value={quality.received.toLocaleString()} />
         <Metric label="Valid M1" value={quality.valid.toLocaleString()} />
+        <Metric label="Warm-up M1" value={quality.warmupCandles.toLocaleString()} />
+        <Metric label="Context M1 total" value={quality.contextValid.toLocaleString()} />
         <Metric label="Invalid" value={quality.invalid.toLocaleString()} />
         <Metric label="Outside [from,to)" value={quality.filteredOutsideRange.toLocaleString()} />
         <Metric label="Duplicates" value={quality.duplicates.toLocaleString()} />
         <Metric label="Missing tradable M1" value={quality.missingTradableCandles.toLocaleString()} />
         <Metric label="Expected closed M1" value={quality.expectedClosedCandles.toLocaleString()} />
+        <Metric label="Closed candles removed" value={quality.closedMarketCandlesRemoved.toLocaleString()} />
+        <Metric label="Stale candles removed" value={quality.staleCandlesRemoved.toLocaleString()} />
+        <Metric label="Gap safety bars" value={quality.gapSafetyCandlesMarked.toLocaleString()} />
         <Metric label="Server processing" value={`${meta.processingMs.toLocaleString()} ms`} />
       </div>
 
@@ -76,7 +81,7 @@ export function QualityPanel({ result }: QualityPanelProps) {
       ) : null}
 
       <p className="form-note">
-        Weekend schedule: {meta.weekendScheduleMode}. {meta.dailyBoundaryDescription} Analysis cache expires at {new Date(meta.cacheExpiresAtUtc).toLocaleString()}.
+        Profile: {meta.analysisProfile}. Context starts {new Date(meta.contextFromUtc).toISOString()} with {meta.warmupCalendarDays} calendar days requested for warm-up. Weekend schedule: {meta.weekendScheduleMode}. {meta.dailyBoundaryDescription} Analysis cache expires at {new Date(meta.cacheExpiresAtUtc).toLocaleString()}.
       </p>
 
       {quality.gapSamples.length > 0 ? (

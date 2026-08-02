@@ -48,6 +48,7 @@ export function createAnalysisReportSummary(
     | "meta"
     | "quality"
     | "datasets"
+    | "visibleRanges"
     | "marketStateSummary"
     | "latestMarketState"
     | "hypothesisOpportunitySummary"
@@ -63,6 +64,8 @@ export function createAnalysisReportSummary(
   const qualityFlags: string[] = [];
   if (analysis.quality.invalid > 0) qualityFlags.push("INVALID_PROVIDER_RECORDS");
   if (analysis.quality.duplicateConflicts > 0) qualityFlags.push("CONFLICTING_DUPLICATES");
+  if (analysis.quality.closedMarketCandlesRemoved > 0) qualityFlags.push("CLOSED_MARKET_CANDLES_REMOVED");
+  if (analysis.quality.staleCandlesRemoved > 0) qualityFlags.push("STALE_PROVIDER_CANDLES_REMOVED");
   if (analysis.quality.missingTradableCandles > 0) qualityFlags.push("MISSING_TRADABLE_CANDLES");
   if (analysis.quality.incompleteByTimeframe.M1 > 0) qualityFlags.push("INCOMPLETE_M1_CANDLES");
   if (qualityFlags.length === 0) qualityFlags.push("NO_CRITICAL_DATA_QUALITY_FLAG");
@@ -99,9 +102,10 @@ export function createAnalysisReportSummary(
   if (diagnosticFlags.length === 0) diagnosticFlags.push("NO_AUTOMATIC_DIAGNOSTIC_FLAG");
 
   const keyFindings = [
-    `${analysis.datasets.M1.candles.length.toLocaleString()} valid M1 candles were analysed with ${analysis.quality.missingTradableCandles.toLocaleString()} missing tradable candles detected.`,
+    `${analysis.quality.valid.toLocaleString()} visible M1 candles were analysed using ${analysis.quality.warmupCandles.toLocaleString()} prior warm-up candles; ${analysis.quality.missingTradableCandles.toLocaleString()} missing tradable candles were detected.`,
     `${signals.confirmedSignalCount.toLocaleString()} confirmed and ${signals.continuationSignalCount.toLocaleString()} continuation decisions were generated; ${signals.invalidationCount.toLocaleString()} invalidations were recorded.`,
     `${trades.qualifiedPlanCount.toLocaleString()} of ${trades.createdPlanCount.toLocaleString()} analytical plans qualified (${qualificationRate.toFixed(2)}%).`,
+    `${trades.tradeReadySignalCount.toLocaleString()} deduplicated A/B trade-ready signals remained after medium-accuracy grading; ${trades.duplicateEpisodeCount.toLocaleString()} overlapping episodes were suppressed.`,
     `${trades.enteredPlanCount.toLocaleString()} qualified plans observed an entry fill (${entryFillRate.toFixed(2)}%); ${trades.tp1HitCount.toLocaleString()} reached TP1 and ${trades.completedPlanCount.toLocaleString()} completed.`,
     `${trades.ambiguousPlanCount.toLocaleString()} plans were conservatively marked intrabar-ambiguous (${ambiguityRate.toFixed(2)}%).`,
   ];
@@ -116,9 +120,14 @@ export function createAnalysisReportSummary(
     dataQuality: {
       received: analysis.quality.received,
       validM1Candles: analysis.quality.valid,
+      contextM1Candles: analysis.quality.contextValid,
+      warmupM1Candles: analysis.quality.warmupCandles,
       invalidRecords: analysis.quality.invalid,
       duplicates: analysis.quality.duplicates,
       duplicateConflicts: analysis.quality.duplicateConflicts,
+      closedMarketCandlesRemoved: analysis.quality.closedMarketCandlesRemoved,
+      staleCandlesRemoved: analysis.quality.staleCandlesRemoved,
+      gapSafetyCandlesMarked: analysis.quality.gapSafetyCandlesMarked,
       missingTradableCandles: analysis.quality.missingTradableCandles,
       expectedClosedCandles: analysis.quality.expectedClosedCandles,
       gapCount: analysis.quality.gapCount,
@@ -157,6 +166,13 @@ export function createAnalysisReportSummary(
       tp1Hit: trades.tp1HitCount,
       tp2Hit: trades.tp2HitCount,
       completed: trades.completedPlanCount,
+      tradeReadySignals: trades.tradeReadySignalCount,
+      gradeA: trades.gradeCounts.A,
+      gradeB: trades.gradeCounts.B,
+      gradeC: trades.gradeCounts.C,
+      blockedGrade: trades.gradeCounts.BLOCKED,
+      averageQualityScore: trades.averageQualityScore,
+      duplicateEpisodesSuppressed: trades.duplicateEpisodeCount,
       averageRiskDistance: trades.averageRiskDistance,
       averageTp1RiskReward: trades.averageTp1RiskReward,
       averageBarsToEntry: trades.averageBarsToEntry,
@@ -171,11 +187,13 @@ export function createAnalysisReportSummary(
       invalidationsPer100Decisions: invalidationPerDecision,
     },
     comparisonMetrics: {
-      m1Candles: analysis.datasets.M1.candles.length,
-      m5Candles: analysis.datasets.M5.candles.length,
-      m15Candles: analysis.datasets.M15.candles.length,
-      h1Candles: analysis.datasets.H1.candles.length,
-      d1Candles: analysis.datasets.D1.candles.length,
+      m1Candles: analysis.visibleRanges.M1.total,
+      m5Candles: analysis.visibleRanges.M5.total,
+      m15Candles: analysis.visibleRanges.M15.total,
+      h1Candles: analysis.visibleRanges.H1.total,
+      d1Candles: analysis.visibleRanges.D1.total,
+      contextM1Candles: analysis.datasets.M1.candles.length,
+      warmupM1Candles: analysis.quality.warmupCandles,
       confirmedSignals: signals.confirmedSignalCount,
       continuationSignals: signals.continuationSignalCount,
       invalidatedSignals: signals.invalidationCount,
@@ -185,6 +203,11 @@ export function createAnalysisReportSummary(
       tp1HitPlans: trades.tp1HitCount,
       completedPlans: trades.completedPlanCount,
       ambiguousPlans: trades.ambiguousPlanCount,
+      tradeReadySignals: trades.tradeReadySignalCount,
+      gradeAPlans: trades.gradeCounts.A,
+      gradeBPlans: trades.gradeCounts.B,
+      averageTradeQualityScore: trades.averageQualityScore,
+      duplicateEpisodesSuppressed: trades.duplicateEpisodeCount,
       qualificationRatePercent: qualificationRate,
       entryFillRatePercent: entryFillRate,
       tp1ProgressRatePercent: tp1ProgressRate,
@@ -213,6 +236,9 @@ function createFamilyBreakdown(
         tp1Hit: 0,
         completed: 0,
         ambiguous: 0,
+        gradeA: 0,
+        gradeB: 0,
+        tradeReady: 0,
       },
     ]),
   ) as Record<OpportunityFamily, AnalysisReportFamilyBreakdown>;
@@ -230,6 +256,9 @@ function createFamilyBreakdown(
     if (plan.highestTargetHit >= 1) bucket.tp1Hit += 1;
     if (plan.status === "COMPLETED") bucket.completed += 1;
     if (plan.status === "AMBIGUOUS_INTRABAR") bucket.ambiguous += 1;
+    if (plan.qualityGrade === "A") bucket.gradeA += 1;
+    if (plan.qualityGrade === "B") bucket.gradeB += 1;
+    if (plan.tradeReady) bucket.tradeReady += 1;
   }
   return result;
 }
@@ -248,6 +277,8 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
     0,
     Math.max(1, signalIndex.eventSlots.length),
     Math.max(1, signalIndex.eventSlots.length),
+    Date.parse(analysis.meta.requestedFromUtc),
+    Date.parse(analysis.meta.requestedToUtc),
   );
   const tradeHistory = createTradePlanHistory(
     tradeIndex,
@@ -255,6 +286,8 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
     0,
     Math.max(1, tradeIndex.plans.length),
     Math.max(1, tradeIndex.plans.length),
+    Date.parse(analysis.meta.requestedFromUtc),
+    Date.parse(analysis.meta.requestedToUtc),
   );
 
   return {
@@ -266,6 +299,8 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
       hypothesisOpportunity: HYPOTHESIS_OPPORTUNITY_CONFIG,
       signalDecision: SIGNAL_DECISION_CONFIG,
       tradeManagement: TRADE_MANAGEMENT_CONFIG,
+      analysisProfile: analysis.meta.analysisProfile,
+      warmupCalendarDays: analysis.meta.warmupCalendarDays,
       userTradeSettings: analysis.meta.tradeManagementSettings,
       dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
       weekendScheduleMode: analysis.meta.weekendScheduleMode,
@@ -303,7 +338,7 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
   const summary = report.summary;
   const familyRows = FAMILIES.map((family) => {
     const item = report.familyBreakdown[family];
-    return `| ${family} | ${item.confirmedSignals} | ${item.continuationSignals} | ${item.invalidations} | ${item.plansCreated} | ${item.plansQualified} | ${item.entriesObserved} | ${item.tp1Hit} | ${item.completed} | ${item.ambiguous} |`;
+    return `| ${family} | ${item.confirmedSignals} | ${item.continuationSignals} | ${item.invalidations} | ${item.plansCreated} | ${item.gradeA} | ${item.gradeB} | ${item.tradeReady} | ${item.entriesObserved} | ${item.tp1Hit} | ${item.completed} |`;
   });
   return [
     `# XAUUSD Analysis Report`,
@@ -317,7 +352,12 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
     "",
     markdownTable([
       ["Provider records", summary.dataQuality.received],
-      ["Valid M1 candles", summary.dataQuality.validM1Candles],
+      ["Visible M1 candles", summary.dataQuality.validM1Candles],
+      ["Context M1 candles", summary.dataQuality.contextM1Candles],
+      ["Warm-up M1 candles", summary.dataQuality.warmupM1Candles],
+      ["Closed-market candles removed", summary.dataQuality.closedMarketCandlesRemoved],
+      ["Stale candles removed", summary.dataQuality.staleCandlesRemoved],
+      ["Gap-safety candles marked", summary.dataQuality.gapSafetyCandlesMarked],
       ["Invalid records", summary.dataQuality.invalidRecords],
       ["Missing tradable candles", summary.dataQuality.missingTradableCandles],
       ["Gap count", summary.dataQuality.gapCount],
@@ -351,6 +391,12 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
     "",
     markdownTable([
       ["Created", summary.tradeOverview.created],
+      ["Trade-ready A/B", summary.tradeOverview.tradeReadySignals],
+      ["Grade A", summary.tradeOverview.gradeA],
+      ["Grade B", summary.tradeOverview.gradeB],
+      ["Grade C", summary.tradeOverview.gradeC],
+      ["Average quality score", summary.tradeOverview.averageQualityScore],
+      ["Overlapping episodes suppressed", summary.tradeOverview.duplicateEpisodesSuppressed],
       ["Qualified", summary.tradeOverview.qualified],
       ["Rejected", summary.tradeOverview.rejected],
       ["Entries observed", summary.tradeOverview.entered],
@@ -372,8 +418,8 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
     "",
     "## Family breakdown",
     "",
-    "| Family | Confirmed | Continuation | Invalidated | Plans | Qualified | Entries | TP1 | Completed | Ambiguous |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Family | Confirmed | Continuation | Invalidated | Plans | Grade A | Grade B | Trade-ready | Entries | TP1 | Completed |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ...familyRows,
     "",
     "## Key findings",

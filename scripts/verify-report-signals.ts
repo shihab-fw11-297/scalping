@@ -111,6 +111,10 @@ const base = {
     source: "FINAGE" as const,
     requestedFromUtc: new Date(from).toISOString(),
     requestedToUtc: new Date(to).toISOString(),
+    contextFromUtc: new Date(from).toISOString(),
+    warmupCalendarDays: 0,
+    warmupCandleCount: 0,
+    analysisProfile: "MEDIUM_ACCURACY_V1" as const,
     intervalSemantics: "[from,to)" as const,
     sourceTimeframe: "M1" as const,
     fetchChunks: 1,
@@ -125,11 +129,16 @@ const base = {
   quality: {
     received: candles.length,
     valid: candles.length,
+    contextValid: candles.length,
+    warmupCandles: 0,
     invalid: 0,
     filteredOutsideRange: 0,
     duplicates: 0,
     duplicateConflicts: 0,
     outOfOrderDetected: false,
+    closedMarketCandlesRemoved: 0,
+    staleCandlesRemoved: 0,
+    gapSafetyCandlesMarked: 0,
     missingTradableCandles: 0,
     expectedClosedCandles: 0,
     gapCount: 0,
@@ -139,6 +148,7 @@ const base = {
     gapSamples: [],
   },
   datasets,
+  visibleRanges: Object.fromEntries(TIMEFRAMES.map((timeframe) => [timeframe, { start: 0, end: datasets[timeframe].candles.length, total: datasets[timeframe].candles.length }])) as CachedAnalysis["visibleRanges"],
   behaviourSummaries,
   priceBehaviourSummaries,
   marketStateSummary: tradeIndex.signalIndex.marketStateSummary,
@@ -169,20 +179,24 @@ assertEqual(report.summary.comparisonMetrics.m1Candles, 40_000, "M1 count");
 assertEqual(report.signalEvents.length, tradeIndex.signalIndex.eventSlots.length, "signal event count");
 assertEqual(report.tradePlans.length, tradeIndex.plans.length, "trade plan count");
 assertCondition(report.summary.keyFindings.length >= 5, "Expected report findings.");
-assertCondition(window.signalMarkers.length > 0, "Expected historical signal markers in the final M1 window.");
-assertCondition(window.signalMarkers.every((marker) => marker.timestampMs >= window.candles[0][0]), "Marker before window.");
-assertCondition(window.signalMarkers.every((marker) => marker.timestampMs <= window.candles.at(-1)![0]), "Marker after window.");
-assertCondition(window.signalMarkers.some((marker) => marker.action === "BUY" || marker.action === "SELL"), "Expected BUY or SELL marker.");
+assertCondition(window.researchSignalMarkers.length > 0, "Expected Phase 6 research markers in the final M1 window.");
+assertCondition(window.signalMarkers.every((marker) => marker.markerKind === "TRADE_READY"), "Trading markers must be A/B trade-ready only.");
+assertCondition(window.signalMarkers.every((marker) => marker.grade === "A" || marker.grade === "B"), "Unexpected trading marker grade.");
+assertCondition(window.researchSignalMarkers.every((marker) => marker.timestampMs >= window.candles[0][0]), "Research marker before window.");
+assertCondition(window.researchSignalMarkers.every((marker) => marker.timestampMs <= window.candles.at(-1)![0]), "Research marker after window.");
 const m5Times = new Set(m5Window.candles.map((candle) => candle[0]));
-assertCondition(m5Window.signalMarkers.every((marker) => m5Times.has(marker.timestampMs)), "M5 marker was not aligned to a visible M5 candle.");
+assertCondition(m5Window.signalMarkers.every((marker) => m5Times.has(marker.timestampMs)), "M5 trade marker was not aligned to a visible M5 candle.");
+assertCondition(m5Window.researchSignalMarkers.every((marker) => m5Times.has(marker.timestampMs)), "M5 research marker was not aligned to a visible M5 candle.");
 assertCondition(reportBytes < 8 * 1024 * 1024, "Single complete report exceeds the 8 MB verification guard.");
 
 console.log(JSON.stringify({
   ok: true,
   signalEvents: report.signalEvents.length,
   tradePlans: report.tradePlans.length,
-  chartMarkers: window.signalMarkers.length,
-  m5ChartMarkers: m5Window.signalMarkers.length,
+  tradeReadyMarkers: window.signalMarkers.length,
+  researchMarkers: window.researchSignalMarkers.length,
+  m5TradeReadyMarkers: m5Window.signalMarkers.length,
+  m5ResearchMarkers: m5Window.researchSignalMarkers.length,
   reportFindings: report.summary.keyFindings.length,
   reportMb: Math.round((reportBytes / 1024 / 1024) * 100) / 100,
 }, null, 2));

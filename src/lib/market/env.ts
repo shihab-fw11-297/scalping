@@ -22,6 +22,7 @@ const envSchema = z.object({
     .max(50_000)
     .default(50_000),
   APP_MAX_CANDLES: z.coerce.number().int().min(1_000).max(250_000).default(100_000),
+  ANALYSIS_WARMUP_CALENDAR_DAYS: z.coerce.number().int().min(0).max(45).default(30),
   APP_MAX_WINDOW_CANDLES: z.coerce.number().int().min(500).max(10_000).default(5_000),
   ANALYSIS_CACHE_TTL_MINUTES: z.coerce.number().int().min(5).max(240).default(30),
   ANALYSIS_CACHE_MAX_ENTRIES: z.coerce.number().int().min(1).max(10).default(3),

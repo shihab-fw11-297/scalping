@@ -1,0 +1,42 @@
+{
+  "release": "MEDIUM_ACCURACY_V1",
+  "verifiedAtUtc": "2026-08-02T07:30:00.000Z",
+  "checks": {
+    "closedMarketFiltering": true,
+    "staleQuoteFiltering": true,
+    "warmupRangeSeparation": true,
+    "softM1ObstacleDoesNotVeto": true,
+    "timeframeRotationContextOnly": true,
+    "ABMarkerFiltering": true,
+    "phase3Regression": true,
+    "phase4Regression": true,
+    "phase5Regression": true,
+    "phase6Regression": true,
+    "phase7Regression": true,
+    "reportMarkerRegression": true,
+    "responsiveRegression": true,
+    "serverlessRegression": true
+  },
+  "syntheticMediumCheck": {
+    "candles": 20000,
+    "createdPlans": 94,
+    "qualifiedPlans": 17,
+    "tradeReadySignals": 17,
+    "gradeA": 2,
+    "gradeB": 15,
+    "blocked": 77
+  },
+  "syntheticPhase7Regression": {
+    "candles": 40000,
+    "plans": 133,
+    "qualified": 59,
+    "entered": 22,
+    "tradeReadyChartMarkers": 4,
+    "researchMarkers": 36
+  },
+  "limitations": [
+    "Synthetic results validate logic and performance, not profitability.",
+    "Real Finage outcome calibration remains required.",
+    "The current environment could not complete npm package installation from the public registry."
+  ]
+}
