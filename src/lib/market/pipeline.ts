@@ -161,7 +161,7 @@ export async function analyzeHistoricalMarket(
     fromTimestampMs: contextFromTimestampMs,
     toTimestampMs,
     multiplierMinutes: 1,
-    targetMaxResults: env.FINAGE_MAX_RESULTS_PER_REQUEST,
+    targetMaxResults: 30000,
   });
 
   const rawChunks = await mapWithConcurrency(
@@ -174,7 +174,7 @@ export async function analyzeHistoricalMarket(
         symbol: env.FINAGE_XAUUSD_SYMBOL,
         fromDate: chunk.fromDate,
         toDate: chunk.toDate,
-        limit: env.FINAGE_MAX_RESULTS_PER_REQUEST,
+        limit: 30000,
         timeoutMs: env.FINAGE_REQUEST_TIMEOUT_MS,
         sort: env.FINAGE_SORT === "provider_default" ? undefined : env.FINAGE_SORT,
         dateFormat:
