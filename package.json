@@ -1,19 +1,25 @@
 {
   "name": "xauusd-phase7-finage",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
-  "packageManager": "npm@10",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/verify-vercel-config.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
+    "typecheck:build": "tsc --noEmit -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark:100k": "tsx scripts/benchmark-100k.ts",
     "verify:finage": "tsx scripts/verify-finage.ts",
     "benchmark:browser": "tsx scripts/benchmark-browser-payload.ts",
+    "verify:vercel": "node scripts/verify-vercel-config.mjs && npm run typecheck:build",
     "verify:release": "npm run verify:responsive && npm run typecheck && npm run test && npm run verify:phase3 && npm run verify:phase4 && npm run verify:phase5 && npm run verify:phase6 && npm run verify:phase7 && npm run verify:report-signals && npm run benchmark:100k && npm run benchmark:browser && npm run build",
     "verify:phase3": "tsx scripts/verify-phase3.ts",
     "verify:phase4": "tsx scripts/verify-phase4.ts",
@@ -24,18 +30,18 @@
     "verify:responsive": "node scripts/verify-responsive.mjs"
   },
   "dependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "lightweight-charts": "5.2.0",
     "next": "16.2.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "typescript": "5.9.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
     "tsx": "^4.20.0",
-    "typescript": "7.0.2",
     "vitest": "4.1.10"
   }
 }

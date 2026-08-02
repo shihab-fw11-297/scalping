@@ -268,6 +268,17 @@ The output semantics are `ANALYTICAL_TRADE_PLAN_NOT_LIVE_EXECUTION`.
 
 Detailed definitions are in `PHASE7_ENGINE_SPEC.md`.
 
+
+## Vercel build deployment
+
+This package includes `vercel.json`, a production-only `tsconfig.build.json`, Node.js 22 pinning, and production-safe TypeScript dependencies. See `VERCEL_DEPLOYMENT.md`.
+
+```bash
+npm install --production=false
+npm run verify:vercel
+npm run build
+```
+
 ## Setup
 
 ```bash
