@@ -33,16 +33,44 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithTimeout(url: URL, timeoutMs: number): Promise<Response> {
+function logFinageMessage(message: string): void {
+  console.log(`[Finage] ${message}`);
+}
+
+function logFinageRequest(url: URL, attempt: number): void {
+  logFinageMessage(`Request attempt ${attempt}: ${maskFinageUrl(url)}`);
+}
+
+function logFinageResponse(url: URL, attempt: number, response: Response, durationMs: number): void {
+  const contentType = response.headers.get("content-type") ?? "<no content-type>";
+  logFinageMessage(
+    `Response attempt ${attempt}: ${maskFinageUrl(url)} ${response.status} ${response.statusText} ${contentType} ${durationMs}ms`,
+  );
+}
+
+function logFinageRetry(url: URL, attempt: number, status: number, reason: string): void {
+  logFinageMessage(`Retrying attempt ${attempt} for ${maskFinageUrl(url)}: status=${status}, reason=${reason}`);
+}
+
+function logFinageError(url: URL, attempt: number, error: Error): void {
+  logFinageMessage(`Error attempt ${attempt}: ${maskFinageUrl(url)} ${error.name}: ${error.message}`);
+}
+
+async function fetchWithTimeout(url: URL, timeoutMs: number, attempt: number): Promise<Response> {
+  logFinageRequest(url, attempt);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const startTime = Date.now();
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
       signal: controller.signal,
     });
+    const durationMs = Date.now() - startTime;
+    logFinageResponse(url, attempt, response, durationMs);
+    return response;
   } finally {
     clearTimeout(timeout);
   }
@@ -132,11 +160,22 @@ async function parseJsonBody(response: Response): Promise<unknown> {
     );
   }
 
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const looksLikeHtml = text.trimStart().startsWith("<");
+  if (contentType.includes("text/html") || looksLikeHtml) {
+    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    const snippet = text.replace(/\s+/g, " ").trim().slice(0, 240);
+    throw new FinageApiError(
+      `Finage returned non-JSON data (${response.status}${statusText}): ${snippet}`,
+      response.status,
+    );
+  }
+
   try {
     return JSON.parse(text) as unknown;
   } catch {
     throw new FinageApiError(
-      `Finage returned non-JSON data (${response.status}): ${text.slice(0, 240)}`,
+      `Finage returned non-JSON JSON data (${response.status}): ${text.slice(0, 240)}`,
       response.status,
     );
   }
@@ -152,12 +191,17 @@ export async function fetchFinageM1AggregateResponse(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(url, params.timeoutMs);
+      const response = await fetchWithTimeout(url, params.timeoutMs, attempt);
       let json: unknown;
       try {
         json = await parseJsonBody(response);
       } catch (error) {
+        if (error instanceof Error) {
+          logFinageError(url, attempt, error);
+        }
+
         if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+          logFinageRetry(url, attempt, response.status, error instanceof Error ? error.message : "transient failure");
           await delay(400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 200));
           continue;
         }

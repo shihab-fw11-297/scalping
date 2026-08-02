@@ -46,7 +46,10 @@ describe("Finage REST contract", () => {
       symbol: "XAUUSD",
       totalResults: 1,
       results: [{ o: 2600, h: 2601, l: 2599, c: 2600.5, v: 10, t: 1767225600000 }],
-    }), { status: 200 })));
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
 
     const result = await fetchFinageM1AggregateResponse(baseParams);
     expect(result.symbol).toBe("XAUUSD");
@@ -58,7 +61,10 @@ describe("Finage REST contract", () => {
       symbol: "XAUUSD",
       totalResults: "1",
       results: [{ o: "2600", h: "2601", l: "2599", c: "2600.5", v: "10", t: "2026-07-27T10:00:00Z" }],
-    }), { status: 200 })));
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
 
     const result = await fetchFinageM1AggregateResponse(baseParams);
     expect(result.totalResults).toBe(1);
@@ -84,6 +90,17 @@ describe("Finage REST contract", () => {
 
     await expect(fetchFinageM1AggregateResponse(baseParams)).rejects.toBeInstanceOf(
       FinageApiError,
+    );
+  });
+
+  it("rejects HTML 502 errors from the provider with a non-JSON message", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<html><head><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>`,
+      { status: 502, headers: { "Content-Type": "text/html" } },
+    )));
+
+    await expect(fetchFinageM1AggregateResponse(baseParams)).rejects.toThrow(
+      /Finage returned non-JSON data \(502\):/,
     );
   });
 });
