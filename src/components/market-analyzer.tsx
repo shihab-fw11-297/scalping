@@ -11,6 +11,7 @@ import { HypothesisOpportunityPanel } from "./hypothesis-opportunity-panel";
 import { SignalDecisionPanel } from "./signal-decision-panel";
 import { TradeManagementPanel } from "./trade-management-panel";
 import { AnalysisReportPanel } from "./analysis-report-panel";
+import { SessionLiquidityPanel } from "./session-liquidity-panel";
 import type {
   AnalysisReport,
   AnalysisReportBundle,
@@ -139,6 +140,7 @@ export function MarketAnalyzer() {
   const [showResearchSignals, setShowResearchSignals] = useState(false);
   const [showInvalidations, setShowInvalidations] = useState(false);
   const [showTradeLevels, setShowTradeLevels] = useState(true);
+  const [showLiquidityLevels, setShowLiquidityLevels] = useState(true);
   const windowRequestSequence = useRef(0);
 
   const total = result?.timeframes[timeframe].candleCount ?? 0;
@@ -384,6 +386,10 @@ export function MarketAnalyzer() {
             }}
           />
           <QualityPanel result={result} />
+          <SessionLiquidityPanel
+            snapshot={windowData.sessionLiquidityAtWindowEnd ?? result.latestSessionLiquidity}
+            summary={result.sessionLiquiditySummary}
+          />
           <MultiTimeframeStatePanel
             snapshot={windowData.marketStateAtWindowEnd ?? result.latestMarketState}
             summary={result.marketStateSummary}
@@ -483,6 +489,10 @@ export function MarketAnalyzer() {
                 <input type="checkbox" checked={showTradeLevels} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowTradeLevels(event.target.checked)} />
                 Latest entry/SL/TP
               </label>
+              <label className="toggle-control">
+                <input type="checkbox" checked={showLiquidityLevels} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowLiquidityLevels(event.target.checked)} />
+                Session/QML levels
+              </label>
               <div className="actions marker-actions">
                 <button type="button" className="secondary" onClick={() => {
                   setShowGradeA(true);
@@ -548,11 +558,13 @@ export function MarketAnalyzer() {
               signalMarkers={windowData.signalMarkers}
               researchSignalMarkers={windowData.researchSignalMarkers}
               tradePlan={windowData.tradePlanAtWindowEnd ?? result.latestTradePlan}
+              sessionLiquidity={windowData.sessionLiquidityAtWindowEnd ?? result.latestSessionLiquidity}
               showGradeA={showGradeA}
               showGradeB={showGradeB}
               showResearchSignals={showResearchSignals}
               showInvalidations={showInvalidations}
               showTradeLevels={showTradeLevels}
+              showLiquidityLevels={showLiquidityLevels}
             />
             <DataTable
               candles={windowData.candles}

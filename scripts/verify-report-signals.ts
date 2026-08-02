@@ -5,6 +5,7 @@ function assertEqual(actual: unknown, expected: unknown, message: string): void 
   if (actual !== expected) throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
 }
 import { aggregateAllTimeframes } from "../src/lib/market/aggregate";
+import { createVisibleRanges } from "../src/lib/market/analysis-range";
 import { summarizeCandleBehaviour } from "../src/lib/market/behaviour";
 import { summarizePriceBehaviour } from "../src/lib/market/price-behaviour";
 import { createAnalysisReport, createAnalysisReportSummary } from "../src/lib/market/report";
@@ -114,7 +115,7 @@ const base = {
     contextFromUtc: new Date(from).toISOString(),
     warmupCalendarDays: 0,
     warmupCandleCount: 0,
-    analysisProfile: "MEDIUM_ACCURACY_V1" as const,
+    analysisProfile: "SESSION_LIQUIDITY_QML_V1" as const,
     intervalSemantics: "[from,to)" as const,
     sourceTimeframe: "M1" as const,
     fetchChunks: 1,
@@ -152,6 +153,8 @@ const base = {
   behaviourSummaries,
   priceBehaviourSummaries,
   marketStateSummary: tradeIndex.signalIndex.marketStateSummary,
+  sessionLiquiditySummary: tradeIndex.signalIndex.sessionLiquidityIndex.summary,
+  latestSessionLiquidity: tradeIndex.signalIndex.sessionLiquidityIndex.latest,
   latestMarketState: tradeIndex.signalIndex.latestMarketState,
   hypothesisOpportunitySummary: tradeIndex.signalIndex.hypothesisOpportunitySummary,
   latestHypothesisOpportunity: tradeIndex.signalIndex.latestHypothesisOpportunity,
@@ -164,6 +167,19 @@ const base = {
 const reportSummary = createAnalysisReportSummary(base);
 const analysis: CachedAnalysis = { ...base, reportSummary };
 const report = createAnalysisReport(analysis);
+const warmupFrom = candles[5_000][0];
+const warmupVisibleRanges = createVisibleRanges(datasets, warmupFrom, to);
+const warmupAnalysis: CachedAnalysis = {
+  ...analysis,
+  meta: {
+    ...analysis.meta,
+    requestedFromUtc: new Date(warmupFrom).toISOString(),
+    contextFromUtc: new Date(from).toISOString(),
+    warmupCandleCount: warmupVisibleRanges.M1.start,
+  },
+  visibleRanges: warmupVisibleRanges,
+};
+const warmupWindow = createMarketWindow(warmupAnalysis, "M1", 0, 500, 5_000);
 const window = createMarketWindow(analysis, "M1", 35_000, 5_000, 5_000);
 const m5Window = createMarketWindow(
   analysis,
@@ -175,6 +191,8 @@ const m5Window = createMarketWindow(
 const reportBytes = new TextEncoder().encode(JSON.stringify(report)).byteLength;
 
 assertEqual(report.analysisId, analysis.id, "analysis id");
+assertEqual(warmupWindow.candles[0]?.[0], candles[5_000][0], "warm-up candle leaked into visible window");
+assertEqual(warmupWindow.total, candles.length - 5_000, "visible window total");
 assertEqual(report.summary.comparisonMetrics.m1Candles, 40_000, "M1 count");
 assertEqual(report.signalEvents.length, tradeIndex.signalIndex.eventSlots.length, "signal event count");
 assertEqual(report.tradePlans.length, tradeIndex.plans.length, "trade plan count");

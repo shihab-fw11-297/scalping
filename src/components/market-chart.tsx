@@ -15,18 +15,20 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { ChartSignalMarker, CompactCandle, TradePlanSnapshot } from "@/lib/market/types";
+import type { ChartSignalMarker, CompactCandle, SessionLiquiditySnapshot, TradePlanSnapshot } from "@/lib/market/types";
 
 interface MarketChartProps {
   candles: readonly CompactCandle[];
   signalMarkers?: readonly ChartSignalMarker[];
   researchSignalMarkers?: readonly ChartSignalMarker[];
   tradePlan?: TradePlanSnapshot | null;
+  sessionLiquidity?: SessionLiquiditySnapshot | null;
   showGradeA?: boolean;
   showGradeB?: boolean;
   showResearchSignals?: boolean;
   showInvalidations?: boolean;
   showTradeLevels?: boolean;
+  showLiquidityLevels?: boolean;
 }
 
 function toChartData(candles: readonly CompactCandle[]): CandlestickData[] {
@@ -97,11 +99,13 @@ export function MarketChart({
   signalMarkers = [],
   researchSignalMarkers = [],
   tradePlan = null,
+  sessionLiquidity = null,
   showGradeA = true,
   showGradeB = true,
   showResearchSignals = false,
   showInvalidations = false,
   showTradeLevels = true,
+  showLiquidityLevels = true,
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -182,9 +186,8 @@ export function MarketChart({
     if (!series) return;
     for (const line of priceLinesRef.current) series.removePriceLine(line);
     priceLinesRef.current = [];
-    if (!showTradeLevels || !tradePlan?.entryZone || !tradePlan.structuralRisk || !tradePlan.targetSpace) return;
-
     const addLine = (price: number, title: string, color: string, lineStyle: LineStyle) => {
+      if (!Number.isFinite(price)) return;
       const line = series.createPriceLine({
         price,
         title,
@@ -195,6 +198,30 @@ export function MarketChart({
       });
       priceLinesRef.current.push(line);
     };
+
+    if (showLiquidityLevels && sessionLiquidity) {
+      if (sessionLiquidity.previousDayHigh !== null) addLine(sessionLiquidity.previousDayHigh, "PDH", "#c084fc", LineStyle.Dotted);
+      if (sessionLiquidity.previousDayLow !== null) addLine(sessionLiquidity.previousDayLow, "PDL", "#c084fc", LineStyle.Dotted);
+      if (sessionLiquidity.previousWeekHigh !== null) addLine(sessionLiquidity.previousWeekHigh, "PWH", "#a78bfa", LineStyle.Dashed);
+      if (sessionLiquidity.previousWeekLow !== null) addLine(sessionLiquidity.previousWeekLow, "PWL", "#a78bfa", LineStyle.Dashed);
+      if (sessionLiquidity.asiaHigh !== null) addLine(sessionLiquidity.asiaHigh, "ASIA H", "#fbbf24", LineStyle.Dotted);
+      if (sessionLiquidity.asiaLow !== null) addLine(sessionLiquidity.asiaLow, "ASIA L", "#fbbf24", LineStyle.Dotted);
+      if (sessionLiquidity.londonHigh !== null) addLine(sessionLiquidity.londonHigh, "LONDON H", "#fb923c", LineStyle.Dotted);
+      if (sessionLiquidity.londonLow !== null) addLine(sessionLiquidity.londonLow, "LONDON L", "#fb923c", LineStyle.Dotted);
+      if (sessionLiquidity.newYorkHigh !== null) addLine(sessionLiquidity.newYorkHigh, "NY H", "#60a5fa", LineStyle.Dotted);
+      if (sessionLiquidity.newYorkLow !== null) addLine(sessionLiquidity.newYorkLow, "NY L", "#60a5fa", LineStyle.Dotted);
+      if (sessionLiquidity.qml.qmlLevel !== null && sessionLiquidity.qml.stage !== "NONE") addLine(sessionLiquidity.qml.qmlLevel, "QML", "#22d3ee", LineStyle.Dashed);
+      if (sessionLiquidity.qml.targetPrice !== null && sessionLiquidity.qml.stage !== "NONE") addLine(sessionLiquidity.qml.targetPrice, "QML TARGET", "#34d399", LineStyle.Dashed);
+    }
+
+    if (!showTradeLevels || !tradePlan?.entryZone || !tradePlan.structuralRisk || !tradePlan.targetSpace) {
+      return () => {
+        const activeSeries = seriesRef.current;
+        if (!activeSeries) return;
+        for (const line of priceLinesRef.current) activeSeries.removePriceLine(line);
+        priceLinesRef.current = [];
+      };
+    }
 
     addLine(tradePlan.entryZone.lower, "ENTRY ZONE LOW", "#7dd3fc", LineStyle.Dotted);
     const entryLinePrice = tradePlan.entryPrice ?? tradePlan.entryZone.preferred;
@@ -223,7 +250,7 @@ export function MarketChart({
       for (const line of priceLinesRef.current) activeSeries.removePriceLine(line);
       priceLinesRef.current = [];
     };
-  }, [tradePlan, showTradeLevels]);
+  }, [tradePlan, sessionLiquidity, showTradeLevels, showLiquidityLevels]);
 
   return <div ref={containerRef} className="chart" aria-label="XAUUSD candlestick chart with medium-accuracy A/B trade markers" />;
 }

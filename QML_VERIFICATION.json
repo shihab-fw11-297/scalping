@@ -1,0 +1,118 @@
+{
+  "release": "SESSION_LIQUIDITY_QML_V1",
+  "generatedAtUtc": "2026-08-02T09:01:45Z",
+  "semantics": "SOFTWARE_REGRESSION_NOT_PROFITABILITY_PROOF",
+  "typescript": {
+    "coreStrict": true,
+    "uiFocusedWithTemporaryDependencyDeclarations": true,
+    "fullSourceWithTemporaryThirdPartyDeclarations": true,
+    "syntax": {
+      "ok": true,
+      "files": 84,
+      "errors": []
+    }
+  },
+  "phase8": {
+    "ok": true,
+    "sampleCount": 25000,
+    "dataReadySamples": 16361,
+    "sessionCounts": {
+      "ASIA": 6480,
+      "LONDON": 6120,
+      "NEW_YORK": 2040,
+      "LONDON_NEW_YORK_OVERLAP": 3060,
+      "OFF_HOURS": 7300
+    },
+    "sweepCount": 488,
+    "bullishSweepCount": 229,
+    "bearishSweepCount": 259,
+    "bosCount": 75,
+    "mssCount": 27,
+    "qmlWatchCount": 362
+  },
+  "phase9": {
+    "ok": true,
+    "confirmations": 2,
+    "firstConfirmationIndex": 14356,
+    "firstConfirmation": {
+      "direction": "BULLISH",
+      "stage": "RETEST_CONFIRMED",
+      "score": 75,
+      "sweepType": "H1_SWING_LOW",
+      "structureType": "MSS",
+      "retestCount": 1,
+      "targetType": "PREVIOUS_DAY_HIGH"
+    },
+    "qmlConfirmedSignals": 2,
+    "qmlPlans": 2,
+    "qmlTradeReady": 2,
+    "qmlMarkers": 2,
+    "bearishConfirmations": 1,
+    "bearishTradeReady": 1,
+    "controlledSecondRetest": {
+      "stage": "RETEST_CONFIRMED",
+      "score": 65,
+      "retestCount": 2
+    },
+    "totalTradeReady": 36,
+    "semantics": "SYNTHETIC_REGRESSION_NOT_PROFITABILITY_PROOF"
+  },
+  "mediumAccuracy": {
+    "ok": true,
+    "closureCandlesRemoved": 2,
+    "staleCandlesRemoved": 2,
+    "gapSafetyPropagatedToM5": true,
+    "warmupCandles": 500,
+    "createdPlans": 95,
+    "qualifiedPlans": 13,
+    "tradeReadySignals": 13,
+    "duplicateEpisodesSuppressed": 0,
+    "gradeCounts": {
+      "A": 0,
+      "B": 13,
+      "C": 0,
+      "BLOCKED": 82
+    },
+    "chartMarkers": 13
+  },
+  "reportSignals": {
+    "ok": true,
+    "signalEvents": 797,
+    "tradePlans": 133,
+    "tradeReadyMarkers": 2,
+    "researchMarkers": 77,
+    "m5TradeReadyMarkers": 2,
+    "m5ResearchMarkers": 77,
+    "reportFindings": 7,
+    "reportMb": 0.69
+  },
+  "serverless": {
+    "ok": true,
+    "embeddedCompleteReport": true,
+    "statelessRecoveryRoutes": 10,
+    "browserWindowCache": true,
+    "staleResponseProtection": true,
+    "recoveryStatusVisible": true
+  },
+  "responsive": {
+    "ok": true,
+    "recordedViewports": 8,
+    "summary": "Responsive verification passed for 8 recorded viewports."
+  },
+  "regressions": {
+    "phase3": true,
+    "phase4": true,
+    "phase5": true,
+    "phase6": true,
+    "phase7": true
+  },
+  "dependencyBackedNextBuild": {
+    "run": false,
+    "reason": "npm dependencies are not installed in this container and public registry access is unavailable",
+    "targetMachineCommands": [
+      "npm install --production=false",
+      "npm run verify:qml",
+      "npm run build"
+    ]
+  }
+}

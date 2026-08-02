@@ -42,7 +42,7 @@ Correctness no longer depends on Vercel instance reuse. However, the first uncac
 - dependency-shim production source compile: passed
 - serverless static route audit: passed
 - injected cache-miss recovery test: passed
-- complete 40K synthetic report: 446 signal events, 133 trade plans, 0.48 MB
+- complete 40K Phase 9 synthetic report: 797 signal events, 133 trade plans, 0.69 MB
 - M1 and M5 marker alignment: passed
 - responsive regression: passed across eight recorded viewports
 

@@ -87,6 +87,24 @@ const staleCandles: CompactCandle[] = [
 const cleanedStale = cleanMarketCandles(staleCandles, { mode: "NEW_YORK_17" });
 invariant(cleanedStale.staleCandlesRemoved === 2, "Repeated stale quotes were not conservatively removed.");
 
+const propagationSource = generate(5);
+const propagationCompleteness = complete(5);
+propagationCompleteness[2] = {
+  ...propagationCompleteness[2],
+  actualChildren: 0,
+  completenessPercent: 0,
+  status: "MISSING_DATA",
+};
+const propagation = aggregateAllTimeframes(propagationSource, {
+  requestFromMs: propagationSource[0][0],
+  requestToMs: propagationSource.at(-1)![0] + MINUTE,
+  weekendSchedule: { mode: "NEW_YORK_17" },
+  dailyBoundaryMode: "NEW_YORK_17",
+  m1Completeness: propagationCompleteness,
+});
+invariant(propagation.M5.completeness[0].status === "MISSING_DATA", "Unsafe M1 source did not propagate to M5 completeness.");
+invariant(propagation.M5.completeness[0].actualChildren === 4, "Derived valid-child count did not exclude unsafe M1 source.");
+
 const rangeCandles = generate(2_000);
 const rangeDatasets = datasetsOf(rangeCandles);
 const displayFrom = rangeCandles[500][0];
@@ -180,6 +198,7 @@ console.log(JSON.stringify({
   ok: true,
   closureCandlesRemoved: cleanedClosure.closedMarketCandlesRemoved,
   staleCandlesRemoved: cleanedStale.staleCandlesRemoved,
+  gapSafetyPropagatedToM5: propagation.M5.completeness[0].status === "MISSING_DATA",
   warmupCandles: ranges.M1.start,
   createdPlans: tradeIndex.summary.createdPlanCount,
   qualifiedPlans: tradeIndex.summary.qualifiedPlanCount,

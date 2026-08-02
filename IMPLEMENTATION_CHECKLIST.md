@@ -371,3 +371,67 @@
 - [x] Medium-accuracy report diagnostics
 - [x] Deterministic and regression verification
 - [ ] Real-market A/B calibration after resolved Finage samples
+
+## Medium Accuracy V1 — Implemented
+
+- [x] Phase 6 research markers separated from trade-ready markers
+- [x] Grade A/B/C/BLOCKED trade quality
+- [x] Medium threshold at 68 and Grade A threshold at 80
+- [x] Quality score capped at 100
+- [x] Regime, location, alignment, timing, target and session scoring
+- [x] Timeframe Rotation changed to confluence-only
+- [x] M1 soft / M5 medium / M15-H1 hard obstacle hierarchy
+- [x] Only hard obstacles can veto target space
+- [x] Same-market-episode signal merging
+- [x] Opposite-direction conflict suppression
+- [x] Default chart shows A/B only
+- [x] Optional research view for Phase 6 events
+- [x] Closed-market candle removal
+- [x] Conservative stale-provider quote removal
+- [x] Post-gap M1 safety marking
+- [x] Gap-safety propagation to M5/M15/H1/D1 completeness
+- [x] Automatic prior warm-up context
+- [x] Warm-up excluded from chart/report totals
+- [x] Serverless timeframe recovery retains warm-up/profile settings
+- [x] A/B grade metrics in reports and UI
+- [x] Obstacle classes and quality fields in CSV/JSON export
+- [x] Deterministic medium-profile verification script
+
+## Phase 8 — Session, Liquidity and Market Structure
+
+- [x] DST-aware Asia, London and New York session clocks
+- [x] London/New York overlap state
+- [x] Previous-day high/low
+- [x] Previous completed trading-week high/low
+- [x] Asia, London and New York opening ranges
+- [x] Confirmed M15/H1 swing liquidity
+- [x] Equal-high/equal-low clusters
+- [x] Sweep requires reclaim
+- [x] Repeated sweep cooldown
+- [x] Closed-candle BOS/MSS
+- [x] Data-ready gating
+- [x] No-lookahead pivot availability
+- [x] Session/liquidity report summary
+- [x] Session/liquidity UI panel
+
+## Phase 9 — Session Liquidity QML
+
+- [x] Contextual QML family added to Phase 5–7
+- [x] Sweep → MSS → retest state machine
+- [x] Original sweep preserved until structure confirmation
+- [x] Shoulder/head geometry validation
+- [x] Invalid shoulder fallback to swept level
+- [x] First retest preferred
+- [x] Controlled second retest permitted
+- [x] Third retest expiry
+- [x] Head-based structural invalidation
+- [x] Opposite-liquidity targets
+- [x] Medium internal and Phase 6 thresholds
+- [x] Grade A/B Phase 7 permission
+- [x] Market-episode deduplication
+- [x] QML chart marker labels
+- [x] Session/QML chart level toggle
+- [x] Bullish and bearish deterministic verification
+- [x] Prefix no-lookahead verification
+- [ ] Real Finage calibration after new reports
+- [ ] Paper execution and risk-governance validation

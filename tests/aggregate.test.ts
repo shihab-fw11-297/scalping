@@ -63,6 +63,26 @@ describe("aggregateAllTimeframes", () => {
     });
   });
 
+
+  it("propagates unsafe M1 source completeness into derived candles", () => {
+    const source = generate(5);
+    const m1Completeness = source.map((_, index) => ({
+      actualChildren: index === 2 ? 0 : 1,
+      expectedChildren: 1,
+      fullIntervalChildren: 1,
+      expectedClosedChildren: 0,
+      completenessPercent: index === 2 ? 0 : 100,
+      status: index === 2 ? "MISSING_DATA" as const : "COMPLETE" as const,
+    }));
+    const base = options(source[0][0], source.at(-1)![0] + 60_000);
+    const result = aggregateAllTimeframes(source, { ...base, m1Completeness });
+    expect(result.M5.completeness[0]).toMatchObject({
+      actualChildren: 4,
+      expectedChildren: 5,
+      status: "MISSING_DATA",
+    });
+  });
+
   it("does not call a request-boundary candle a provider data failure", () => {
     const source = generate(3, Date.UTC(2026, 0, 1, 0, 2));
     const result = aggregateAllTimeframes(

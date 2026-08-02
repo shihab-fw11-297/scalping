@@ -77,8 +77,8 @@ Completed in this environment:
 - Analyze response includes an immediate report summary.
 - Complete JSON report generation passed.
 - Markdown report generation is implemented.
-- 40,000-candle report contained 446 Phase 6 events and 133 Phase 7 plans.
-- Complete report size was approximately 0.48 MB in the 40K verification fixture.
+- 40,000-candle Phase 9 report contained 797 signal events and 133 Phase 7 plans.
+- Complete report size was approximately 0.69 MB in the 40K Phase 9 verification fixture.
 - M1 chart window contained 36 historical signal markers.
 - The same 36 events aligned to visible M5 candles.
 - All marker timestamps were inside the requested window.
@@ -128,3 +128,74 @@ The dependency-backed Next.js build remains a target-machine gate because the co
 - Recovery status is exposed in the response and UI.
 - Injected cache-miss recovery verification passed.
 - The previous immediate expired-analysis message is absent from application routes.
+
+## Medium Accuracy V1 verification
+
+Completed in this environment:
+
+- Full market-core strict TypeScript compilation passed.
+- Full source and verification-script integration compilation passed using temporary declarations only for unavailable third-party packages.
+- Closed-market removal verification passed.
+- Conservative repeated stale-quote removal verification passed.
+- Warm-up/visible-range isolation passed.
+- Minor M1 obstacles remain soft and cannot become target vetoes.
+- M5 obstacles remain medium management references.
+- M15/H1 structure remains the hard target decision layer.
+- All quality scores remained inside 0–100.
+- Timeframe Rotation remained context-only.
+- Trading markers contained only Grade A/B plans.
+- Phase 3, 4, 5, 6 and 7 regressions passed.
+- Report/history generation and M1→M5 marker alignment passed.
+- Responsive verification passed.
+- Vercel serverless recovery static verification passed.
+
+Deterministic 20,000-candle medium-profile fixture:
+
+```text
+Created plans:                  95
+Qualified / trade-ready:       13
+Grade A:                        0
+Grade B:                       13
+Blocked/research-only:         82
+```
+
+The 40,000-candle Phase 9 report fixture produced 2 trade-ready markers versus 77 research markers in the final M1 window. This demonstrates the intended separation between analytical pattern activity and clean trading-view output.
+
+These are software-behaviour fixtures, not real-XAUUSD accuracy or profitability measurements. New Finage reports must be generated after deployment because old bundles were created by the prior target and grading rules.
+
+## Phase 8–9 Session Liquidity QML verification
+
+Completed in this environment:
+
+- Core Phase 8–9 strict TypeScript compilation passed.
+- Focused UI TypeScript compilation passed using temporary declarations for unavailable React/chart packages.
+- 84 TypeScript/TSX source, script and test files passed syntax transpilation.
+- Previous-week levels now use the latest completed trading-week group before the current week, not a rolling five-day approximation.
+- QML summary/strongest-setup counts use state transitions and do not duplicate a confirmation across persisted candles.
+- Phase 8 deterministic fixture reached data-ready state and produced reclaimed bullish and bearish sweeps plus closed-candle BOS/MSS.
+- Phase 9 bullish fixture completed sweep → MSS → first retest → Phase 6 confirmation → Phase 7 A/B plan → chart marker.
+- The mirrored-price fixture completed the equivalent bearish chain and produced a bearish A/B Phase 7 plan.
+- Prefix replay before the first retest produced zero QML confirmations, preserving no-lookahead behaviour.
+- Phase 3, Phase 4, Phase 5, Phase 6 and Phase 7 regression suites passed after Phase 8–9 integration.
+- Medium-accuracy, complete-report, marker-alignment, responsive and serverless static regressions passed.
+
+Latest deterministic outputs:
+
+```text
+Phase 8 fixture candles:          25,000
+Data-ready samples:               16,361
+Liquidity sweeps:                    488
+Bullish / bearish sweeps:          229 / 259
+BOS / MSS:                           75 / 27
+QML sweep watches:                    362
+
+Phase 9 bullish confirmations:          2
+Phase 9 bullish A/B plans:              2
+Phase 9 bullish chart markers:          2
+Mirrored bearish confirmations:         1
+Mirrored bearish A/B plans:             1
+```
+
+These figures verify deterministic engine behaviour and directional symmetry. They are not a win rate or profitability result.
+
+The dependency-backed `next build` remains a target-machine gate because this container does not have installed npm packages and its public registry access is unavailable. Vercel/npm should run `npm install --production=false`, `npm run verify:qml` and `npm run build`.

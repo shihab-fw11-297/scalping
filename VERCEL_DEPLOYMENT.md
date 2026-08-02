@@ -32,7 +32,7 @@ Use the folder containing `package.json` as the Vercel Root Directory.
 - Build command: `npm run build`
 - Output directory: leave blank/default
 
-Do not add `NODE_ENV=production` manually. Add `FINAGE_API_KEY` and the other required server variables from `.env.example`.
+Do not add `NODE_ENV=production` manually. Add `FINAGE_API_KEY` and the other required server variables from `.env.example`. `ANALYSIS_WARMUP_CALENDAR_DAYS=30` is the recommended Medium Accuracy V1 default.
 
 After replacing the project files, redeploy without the previous build cache.
 
@@ -43,6 +43,7 @@ npm install --production=false
 npm run verify:vercel
 npm run verify:serverless
 npm run verify:analysis-recovery
+npm run verify:medium-accuracy
 npm run verify:report-signals
 npm run build
 ```
@@ -50,6 +51,8 @@ npm run build
 ## Runtime behaviour
 
 - The initial complete report is available immediately after a successful fetch.
+- The selected chart/report period is computed with prior warm-up context but warm-up candles remain hidden from visible totals.
+- Trading view shows deduplicated Grade A/B markers; Phase 6 research markers are optional.
 - The first timeframe request that lands on a different Vercel instance may rebuild from Finage and therefore take longer.
 - The UI displays whether the loaded window was rebuilt.
 - Returning to an already loaded timeframe/window uses current-tab browser cache.

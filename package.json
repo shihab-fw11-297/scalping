@@ -1,6 +1,6 @@
 {
-  "name": "xauusd-phase7-finage",
-  "version": "1.0.0-medium",
+  "name": "xauusd-phase9-session-qml",
+  "version": "1.2.1-qml-static-limits",
   "private": true,
   "packageManager": "npm@10.9.2",
   "engines": {
@@ -20,7 +20,7 @@
     "verify:finage": "tsx scripts/verify-finage.ts",
     "benchmark:browser": "tsx scripts/benchmark-browser-payload.ts",
     "verify:vercel": "node scripts/verify-vercel-config.mjs && npm run typecheck:build",
-    "verify:release": "npm run verify:responsive && npm run verify:serverless && npm run verify:analysis-recovery && npm run typecheck && npm run test && npm run verify:phase3 && npm run verify:phase4 && npm run verify:phase5 && npm run verify:phase6 && npm run verify:phase7 && npm run verify:medium-accuracy && npm run verify:report-signals && npm run benchmark:100k && npm run benchmark:browser && npm run build",
+    "verify:release": "npm run verify:static-limits && npm run verify:responsive && npm run verify:serverless && npm run verify:analysis-recovery && npm run typecheck && npm run test && npm run verify:phase3 && npm run verify:phase4 && npm run verify:phase5 && npm run verify:phase6 && npm run verify:phase7 && npm run verify:phase8 && npm run verify:phase9 && npm run verify:medium-accuracy && npm run verify:report-signals && npm run benchmark:100k && npm run benchmark:browser && npm run build",
     "verify:phase3": "tsx scripts/verify-phase3.ts",
     "verify:phase4": "tsx scripts/verify-phase4.ts",
     "verify:phase5": "tsx scripts/verify-phase5.ts",
@@ -30,17 +30,21 @@
     "verify:responsive": "node scripts/verify-responsive.mjs",
     "verify:serverless": "node scripts/verify-serverless-runtime.mjs",
     "verify:analysis-recovery": "tsx scripts/verify-analysis-recovery.ts",
-    "verify:medium-accuracy": "tsx scripts/verify-medium-accuracy.ts"
+    "verify:medium-accuracy": "tsx scripts/verify-medium-accuracy.ts",
+    "verify:phase8": "tsx scripts/verify-phase8-session-liquidity.ts",
+    "verify:phase9": "tsx scripts/verify-phase9-qml.ts",
+    "verify:qml": "npm run verify:phase8 && npm run verify:phase9",
+    "verify:static-limits": "node scripts/verify-static-limits.mjs"
   },
   "dependencies": {
-    "@types/node": "^22.20.1",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "lightweight-charts": "5.2.0",
     "next": "16.2.9",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "typescript": "^7.0.2",
+    "typescript": "5.9.3",
     "zod": "4.4.3"
   },
   "devDependencies": {

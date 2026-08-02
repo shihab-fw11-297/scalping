@@ -1,6 +1,10 @@
 import { analyzeCandleBehaviourWindow } from "./behaviour";
 import { analyzePriceBehaviourWindow } from "./price-behaviour";
 import { getNextDailyBucketStart } from "./market-session";
+import {
+  analyzeSessionLiquidityAt,
+  getOrCreateSessionLiquidityIndex,
+} from "./session-liquidity";
 import { TIMEFRAME_MS } from "./constants";
 import {
   analyzeMultiTimeframeStateAt,
@@ -144,6 +148,12 @@ export function createMarketWindow(
     absoluteEnd,
     analysis.meta.dailyBoundaryMode,
   );
+  const sessionLiquidityAtWindowEnd = lastCandle
+    ? analyzeSessionLiquidityAt(
+        getOrCreateSessionLiquidityIndex(analysis.datasets, analysis.meta.dailyBoundaryMode),
+        windowAnchorTimestamp(timeframe, lastCandle[0], analysis.meta.dailyBoundaryMode),
+      )
+    : null;
   const tradePlanAtWindowEnd = lastCandle
     ? analyzeTradeManagementAt(
         tradeIndex,
@@ -168,5 +178,6 @@ export function createMarketWindow(
     hypothesisOpportunityAtWindowEnd,
     signalDecisionAtWindowEnd,
     tradePlanAtWindowEnd,
+    sessionLiquidityAtWindowEnd,
   };
 }

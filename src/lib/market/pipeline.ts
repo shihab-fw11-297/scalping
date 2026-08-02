@@ -7,6 +7,10 @@ import { cleanMarketCandles, createM1CompletenessWithGapSafety } from "./data-cl
 import { summarizePriceBehaviour } from "./price-behaviour";
 import { createAnalysisReport, createAnalysisReportSummary } from "./report";
 import {
+  analyzeSessionLiquidityAt,
+  summarizeSessionLiquidityRange,
+} from "./session-liquidity";
+import {
   DEFAULT_TRADE_MANAGEMENT_SETTINGS,
   analyzeTradeManagementAt,
   getOrCreateTradeManagementIndex,
@@ -16,6 +20,7 @@ import { planFinageDateChunks } from "./chunk-plan";
 import { mapWithConcurrency } from "./concurrency";
 import { ALL_TIMEFRAMES } from "./constants";
 import { getServerEnv } from "./env";
+import { STATIC_RUNTIME_LIMITS } from "./static-limits";
 import { describeDailyBoundary, type WeekendSchedule } from "./market-session";
 import {
   analyzeMultiTimeframeStateAt,
@@ -153,7 +158,7 @@ export async function analyzeHistoricalMarket(
   const warmupCalendarDays = resolveWarmupCalendarDays(
     calendarDays,
     env.ANALYSIS_WARMUP_CALENDAR_DAYS,
-    env.APP_MAX_CANDLES,
+    STATIC_RUNTIME_LIMITS.APP_MAX_CANDLES,
   );
   const contextFromTimestampMs = fromTimestampMs - warmupCalendarDays * 86_400_000;
 
@@ -161,7 +166,7 @@ export async function analyzeHistoricalMarket(
     fromTimestampMs: contextFromTimestampMs,
     toTimestampMs,
     multiplierMinutes: 1,
-    targetMaxResults: 30000,
+    targetMaxResults: STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
   });
 
   const rawChunks = await mapWithConcurrency(
@@ -174,7 +179,7 @@ export async function analyzeHistoricalMarket(
         symbol: env.FINAGE_XAUUSD_SYMBOL,
         fromDate: chunk.fromDate,
         toDate: chunk.toDate,
-        limit: 30000,
+        limit: STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
         timeoutMs: env.FINAGE_REQUEST_TIMEOUT_MS,
         sort: env.FINAGE_SORT === "provider_default" ? undefined : env.FINAGE_SORT,
         dateFormat:
@@ -230,10 +235,10 @@ export async function analyzeHistoricalMarket(
   const cleaned = cleanMarketCandles(deduped.candles, weekendSchedule);
   if (issues.length < 100) issues.push(...cleaned.issues.slice(0, 100 - issues.length));
 
-  if (cleaned.candles.length > env.APP_MAX_CANDLES) {
+  if (cleaned.candles.length > STATIC_RUNTIME_LIMITS.APP_MAX_CANDLES) {
     throw new Error(
       `The selected range plus automatic warm-up returned ${cleaned.candles.length.toLocaleString()} candles. ` +
-        `Reduce it to ${env.APP_MAX_CANDLES.toLocaleString()} candles or fewer.`,
+        `Reduce it to ${STATIC_RUNTIME_LIMITS.APP_MAX_CANDLES.toLocaleString()} candles or fewer.`,
     );
   }
   if (cleaned.candles.length === 0) {
@@ -294,6 +299,14 @@ export async function analyzeHistoricalMarket(
     settings: tradeManagementSettings,
   });
   const signalDecisionIndex = tradeManagementIndex.signalIndex;
+  const sessionLiquidityResult = {
+    summary: summarizeSessionLiquidityRange(
+      signalDecisionIndex.sessionLiquidityIndex,
+      fromTimestampMs,
+      toTimestampMs,
+    ),
+    latest: analyzeSessionLiquidityAt(signalDecisionIndex.sessionLiquidityIndex, toTimestampMs),
+  };
   const rangedMarketState = summarizeMultiTimeframeStates(
     signalDecisionIndex.stateIndex,
     undefined,
@@ -350,7 +363,7 @@ export async function analyzeHistoricalMarket(
     contextFromUtc: new Date(contextFromTimestampMs).toISOString(),
     warmupCalendarDays,
     warmupCandleCount: visibleRanges.M1.start,
-    analysisProfile: "MEDIUM_ACCURACY_V1" as const,
+    analysisProfile: "SESSION_LIQUIDITY_QML_V1" as const,
     intervalSemantics: "[from,to)" as const,
     sourceTimeframe: "M1" as const,
     fetchChunks: chunks.length,
@@ -359,7 +372,7 @@ export async function analyzeHistoricalMarket(
     weekendScheduleMode: env.FOREX_WEEKEND_MODE,
     dailyBoundaryMode: env.DAILY_BOUNDARY_MODE,
     dailyBoundaryDescription: describeDailyBoundary(env.DAILY_BOUNDARY_MODE),
-    maxWindowCandles: env.APP_MAX_WINDOW_CANDLES,
+    maxWindowCandles: STATIC_RUNTIME_LIMITS.APP_MAX_WINDOW_CANDLES,
     tradeManagementSettings,
   };
   const quality = {
@@ -389,6 +402,8 @@ export async function analyzeHistoricalMarket(
     datasets,
     visibleRanges,
     marketStateSummary: marketStateResult.summary,
+    sessionLiquiditySummary: sessionLiquidityResult.summary,
+    latestSessionLiquidity: sessionLiquidityResult.latest,
     latestMarketState: marketStateResult.latest,
     hypothesisOpportunitySummary: hypothesisOpportunityResult.summary,
     latestHypothesisOpportunity: hypothesisOpportunityResult.latest,
@@ -407,6 +422,8 @@ export async function analyzeHistoricalMarket(
       behaviourSummaries,
       priceBehaviourSummaries,
       marketStateSummary: marketStateResult.summary,
+      sessionLiquiditySummary: sessionLiquidityResult.summary,
+      latestSessionLiquidity: sessionLiquidityResult.latest,
       latestMarketState: marketStateResult.latest,
       hypothesisOpportunitySummary: hypothesisOpportunityResult.summary,
       latestHypothesisOpportunity: hypothesisOpportunityResult.latest,
@@ -453,6 +470,8 @@ export async function analyzeHistoricalMarket(
     behaviourSummaries,
     priceBehaviourSummaries,
     marketStateSummary: marketStateResult.summary,
+    sessionLiquiditySummary: sessionLiquidityResult.summary,
+    latestSessionLiquidity: sessionLiquidityResult.latest,
     latestMarketState: marketStateResult.latest,
     hypothesisOpportunitySummary: hypothesisOpportunityResult.summary,
     latestHypothesisOpportunity: hypothesisOpportunityResult.latest,
@@ -468,7 +487,7 @@ export async function analyzeHistoricalMarket(
       initialTimeframe,
       initialOffset,
       initialLimit,
-      env.APP_MAX_WINDOW_CANDLES,
+      STATIC_RUNTIME_LIMITS.APP_MAX_WINDOW_CANDLES,
     ),
   };
 }

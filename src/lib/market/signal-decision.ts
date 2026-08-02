@@ -12,6 +12,11 @@ import {
 import { getNextDailyBucketStart, type DailyBoundaryMode } from "./market-session";
 import { TIMEFRAME_MS } from "./constants";
 import { analyzePriceBehaviourWindow } from "./price-behaviour";
+import {
+  getOrCreateSessionLiquidityIndex,
+  sessionLiquidityAtIndex,
+  type SessionLiquidityIndex,
+} from "./session-liquidity";
 import type {
   ChartSignalMarker,
   CompactCandle,
@@ -73,6 +78,7 @@ export const SIGNAL_OPPORTUNITY_FAMILIES: readonly OpportunityFamily[] = [
   "FAILED_BREAK_REVERSAL",
   "IMPULSE_RELOAD",
   "TIMEFRAME_ROTATION",
+  "SESSION_LIQUIDITY_QML",
 ];
 const LIFECYCLES: readonly SignalLifecycleState[] = [
   "OBSERVING",
@@ -239,6 +245,7 @@ interface SignalArrays {
 
 export interface SignalDecisionIndex {
   stateIndex: MultiTimeframeStateIndex;
+  sessionLiquidityIndex: SessionLiquidityIndex;
   arrays: SignalArrays;
   summary: SignalDecisionSummary;
   latest: SignalDecisionSnapshot | null;
@@ -399,6 +406,10 @@ function hasLateBlocker(candidate: OpportunityCandidate): boolean {
   return candidate.blockers.includes("HIGH_LATE_ENTRY_RISK") || candidate.blockers.includes("EXTENDED_MOVE");
 }
 
+function hasQmlRetestEvidence(candidate: OpportunityCandidate): boolean {
+  return candidate.evidence.includes("FIRST_RETEST") || candidate.evidence.includes("SECOND_RETEST");
+}
+
 function familyTriggerValid(
   candidate: OpportunityCandidate,
   state: MultiTimeframeStateSnapshot,
@@ -412,6 +423,11 @@ function familyTriggerValid(
   }
   if (candidate.family === "IMPULSE_RELOAD") {
     return candidate.evidence.includes("CONTROLLED_PULLBACK") && candidate.evidence.includes("RECOVERY_CONFIRMED");
+  }
+  if (candidate.family === "SESSION_LIQUIDITY_QML") {
+    return candidate.evidence.includes("LIQUIDITY_SWEEP") &&
+      candidate.evidence.includes("MARKET_STRUCTURE_SHIFT") &&
+      hasQmlRetestEvidence(candidate);
   }
   return candidate.evidence.includes("LOWER_TIMEFRAME_ROTATION") && state.m1.direction === candidate.direction;
 }
@@ -430,8 +446,21 @@ function hypothesisAllowsConfirmation(
   ) {
     return { allowed: true, exception: false };
   }
+  const qmlFullChain = candidate.family === "SESSION_LIQUIDITY_QML" &&
+    candidate.evidence.includes("LIQUIDITY_SWEEP") &&
+    candidate.evidence.includes("MARKET_STRUCTURE_SHIFT") &&
+    hasQmlRetestEvidence(candidate);
+  if (qmlFullChain) {
+    const oppositeScore = oppositeHypothesisScore(hypothesis, candidate.direction);
+    const rangeOrUnclearThesis = hypothesis.leadingHypothesis === "RANGE" || hypothesis.leadingHypothesisScore < 52;
+    const qmlException = candidate.score >= 78 &&
+      (rangeOrUnclearThesis || ownScore >= 16 || gap <= 28) &&
+      !(oppositeScore >= 72 && oppositeScore >= ownScore + 30);
+    return { allowed: qmlException, exception: qmlException };
+  }
   const exceptionFamily =
-    candidate.family === "FAILED_BREAK_REVERSAL" || candidate.family === "TIMEFRAME_ROTATION";
+    candidate.family === "FAILED_BREAK_REVERSAL" ||
+    candidate.family === "TIMEFRAME_ROTATION";
   const exception = exceptionFamily && candidate.score >= 78 && ownScore >= 32;
   return { allowed: exception, exception };
 }
@@ -465,25 +494,28 @@ function confirmationQuality(
     noTradeMask = addNoTrade(noTradeMask, "MISSING_TRIGGER");
   }
 
+  const qmlFamily = candidate.family === "SESSION_LIQUIDITY_QML";
+  const confirmationMinimum = qmlFamily ? 68 : SIGNAL_DECISION_CONFIG.confirmationMinimumScore;
+  const timingAllowed = qmlFamily
+    ? candidate.freshnessScore >= 42 && state.m1.quality !== "NOISY"
+    : state.m1.quality !== "LATE" && state.m1.lateEntryRisk !== "HIGH" && state.m5.lateEntryRisk !== "HIGH";
   const valid =
     candidate.stage === "MATURE_CANDIDATE" &&
-    candidate.score >= SIGNAL_DECISION_CONFIG.confirmationMinimumScore &&
+    candidate.score >= confirmationMinimum &&
     candidate.direction !== "NEUTRAL" &&
     !hasSevereBlocker(candidate) &&
     !hasLateBlocker(candidate) &&
     state.m1.quality !== "NOISY" &&
-    state.m1.quality !== "LATE" &&
-    state.m1.lateEntryRisk !== "HIGH" &&
-    state.m5.lateEntryRisk !== "HIGH" &&
+    timingAllowed &&
     familyTriggerValid(candidate, state) &&
     hypothesisResult.allowed;
 
-  const fastTrack =
-    valid &&
+  const fastTrack = valid && (qmlFamily || (
     candidate.score >= SIGNAL_DECISION_CONFIG.fastTrackScore &&
     candidate.triggerScore >= SIGNAL_DECISION_CONFIG.fastTrackTriggerScore &&
     candidate.freshnessScore >= SIGNAL_DECISION_CONFIG.fastTrackFreshnessScore &&
-    state.m1.quality === "CLEAN";
+    state.m1.quality === "CLEAN"
+  ));
 
   return { valid, fastTrack, reasonMask, noTradeMask };
 }
@@ -620,7 +652,11 @@ function processTrack(input: {
     return decision;
   }
 
-  if (runtime.cooldownUntilIndex >= candleIndex && !isActive(runtime.state)) {
+  const qmlFullChainBypass = candidate.family === "SESSION_LIQUIDITY_QML" &&
+    candidate.stage === "MATURE_CANDIDATE" &&
+    candidate.score >= 75 &&
+    familyTriggerValid(candidate, state);
+  if (runtime.cooldownUntilIndex >= candleIndex && !isActive(runtime.state) && !qmlFullChainBypass) {
     decision.state = "NO_TRADE";
     decision.direction = candidate.direction;
     decision.reasonMask = addReason(decision.reasonMask, "COOLDOWN_ACTIVE");
@@ -992,6 +1028,7 @@ function reconstructSnapshot(
 
 function buildIndex(
   stateIndex: MultiTimeframeStateIndex,
+  sessionLiquidityIndex: SessionLiquidityIndex,
 ): SignalDecisionIndex {
   const sampleCount = stateIndex.datasets.M1.candles.length;
   const arrays = allocateArrays(sampleCount);
@@ -1061,7 +1098,11 @@ function buildIndex(
       });
     }
 
-    const hypothesis = evaluateHypothesesAndOpportunities(state, feature);
+    const hypothesis = evaluateHypothesesAndOpportunities(
+      state,
+      feature,
+      sessionLiquidityAtIndex(sessionLiquidityIndex, candleIndex),
+    );
     latestOpportunity = hypothesis;
     leadingScoreTotal += hypothesis.leadingHypothesisScore;
     leadingHypothesisCounts[hypothesis.leadingHypothesis] += 1;
@@ -1224,6 +1265,7 @@ function buildIndex(
 
   const index: SignalDecisionIndex = {
     stateIndex,
+    sessionLiquidityIndex,
     arrays,
     summary,
     latest: null,
@@ -1243,7 +1285,9 @@ export function createSignalDecisionIndex(
   datasets: Record<Timeframe, TimeframeDataset>,
   options: BuildOptions,
 ): SignalDecisionIndex {
-  return buildIndex(getOrCreateMultiTimeframeStateIndex(datasets, options));
+  const stateIndex = getOrCreateMultiTimeframeStateIndex(datasets, options);
+  const sessionLiquidityIndex = getOrCreateSessionLiquidityIndex(datasets, options.dailyBoundaryMode);
+  return buildIndex(stateIndex, sessionLiquidityIndex);
 }
 
 export function getOrCreateSignalDecisionIndex(
@@ -1395,7 +1439,11 @@ export function analyzeSignalDecisionAt(
     1,
   )[0];
   if (!feature) return null;
-  const hypothesis = evaluateHypothesesAndOpportunities(state, feature);
+  const hypothesis = evaluateHypothesesAndOpportunities(
+    state,
+    feature,
+    sessionLiquidityAtIndex(index.sessionLiquidityIndex, candleIndex),
+  );
   return reconstructSnapshot(index, candleIndex, state, hypothesis);
 }
 
@@ -1410,12 +1458,19 @@ export function signalDecisionSnapshotAtIndex(
     index,
     candleIndex,
     state,
-    evaluateHypothesesAndOpportunities(state, feature),
+    evaluateHypothesesAndOpportunities(
+      state,
+      feature,
+      sessionLiquidityAtIndex(index.sessionLiquidityIndex, candleIndex),
+    ),
   );
 }
 
 export function asHypothesisOpportunityIndex(index: SignalDecisionIndex): HypothesisOpportunityIndex {
-  return { stateIndex: index.stateIndex };
+  return {
+    stateIndex: index.stateIndex,
+    sessionLiquidityIndex: index.sessionLiquidityIndex,
+  };
 }
 
 export function createSignalDecisionHistory(
@@ -1612,7 +1667,7 @@ export function simulateSignalDecisionSequence(
 
   for (let candleIndex = 0; candleIndex < samples.length; candleIndex += 1) {
     const sample = samples[candleIndex];
-    const hypothesis = evaluateHypothesesAndOpportunities(sample.state, sample.feature);
+    const hypothesis = evaluateHypothesesAndOpportunities(sample.state, sample.feature, null);
     const candidates = SIGNAL_OPPORTUNITY_FAMILIES.map((family) => opportunityByFamily(hypothesis, family));
     const tracks: SignalDecisionSimulationStep["tracks"] = [];
 

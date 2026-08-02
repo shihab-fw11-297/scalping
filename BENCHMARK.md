@@ -57,7 +57,7 @@ The fixture deliberately exercises structural rejection, target-space rejection,
 ## Complexity
 
 - O(N) Phase 7 lifecycle traversal
-- fixed four-family runtime
+- fixed five-family runtime, including contextual Session Liquidity QML
 - O(1) per-candle active-plan updates
 - bounded M1/M5/M15/H1 obstacle work only when a plan is created
 - compact typed arrays for historical state
@@ -76,11 +76,11 @@ The fixture deliberately exercises structural rejection, target-space rejection,
 ## Automatic report and marker measurements
 
 ```text
-40K verification signal events:       446
+40K verification signal events:       797
 40K verification trade plans:         133
-M1 markers in final 5K window:          36
-M5-aligned markers:                     36
-Complete 40K JSON report:          ~0.48 MB
+M1 trade-ready markers in final window:  2
+M5-aligned trade-ready markers:           2
+Complete 40K JSON report:          ~0.69 MB
 ```
 
 Latest regression after adding windowed signal markers:

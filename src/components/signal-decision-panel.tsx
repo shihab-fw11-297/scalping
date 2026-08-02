@@ -37,23 +37,23 @@ export function SignalDecisionPanel({
     <section className="panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Phase 6 · Deterministic decision lifecycle</p>
-          <h2>Signal decision engine</h2>
+          <p className="eyebrow">Phase 6 · Pattern research lifecycle</p>
+          <h2>Pattern confirmation engine</h2>
         </div>
         <span className={`status-pill ${lifecycleClass(snapshot.lifecycle)}`}>
-          {snapshot.lifecycle} · {snapshot.action}
+          Pattern {snapshot.lifecycle} · {snapshot.action}
         </span>
       </div>
 
       <p className="form-note window-note">
-        CONFIRMED and CONTINUATION are Phase 6 directional decisions. Phase 7 below may qualify or reject them using entry location, structural risk, costs, target space, expiry and no-chase controls.
+        CONFIRMED and CONTINUATION mean pattern-confirmed research events, not trade-ready BUY/SELL calls. Only a deduplicated Grade A/B Phase 7 plan becomes a trading-view signal.
       </p>
 
       <div className="signal-primary-grid">
         <article className={`signal-primary-card ${lifecycleClass(snapshot.lifecycle)}`}>
-          <span>Current lifecycle</span>
+          <span>Current pattern lifecycle</span>
           <strong>{snapshot.lifecycle}</strong>
-          <b>{snapshot.action}</b>
+          <b>{snapshot.action === "NONE" ? "No direction" : `${snapshot.action} pattern`}</b>
           <small>{new Date(snapshot.timestampMs).toISOString()}</small>
         </article>
         <div className="metric">

@@ -1,5 +1,6 @@
 import { HYPOTHESIS_OPPORTUNITY_CONFIG } from "./hypothesis-opportunity";
 import { MULTI_TIMEFRAME_STATE_CONFIG } from "./multi-timeframe-state";
+import { SESSION_LIQUIDITY_CONFIG } from "./session-liquidity";
 import { PRICE_BEHAVIOUR_CONFIG } from "./price-behaviour";
 import {
   createSignalDecisionHistory,
@@ -27,6 +28,7 @@ const FAMILIES: readonly OpportunityFamily[] = [
   "FAILED_BREAK_REVERSAL",
   "IMPULSE_RELOAD",
   "TIMEFRAME_ROTATION",
+  "SESSION_LIQUIDITY_QML",
 ];
 
 function percentage(numerator: number, denominator: number): number {
@@ -50,6 +52,8 @@ export function createAnalysisReportSummary(
     | "datasets"
     | "visibleRanges"
     | "marketStateSummary"
+    | "sessionLiquiditySummary"
+    | "latestSessionLiquidity"
     | "latestMarketState"
     | "hypothesisOpportunitySummary"
     | "latestHypothesisOpportunity"
@@ -108,6 +112,7 @@ export function createAnalysisReportSummary(
     `${trades.tradeReadySignalCount.toLocaleString()} deduplicated A/B trade-ready signals remained after medium-accuracy grading; ${trades.duplicateEpisodeCount.toLocaleString()} overlapping episodes were suppressed.`,
     `${trades.enteredPlanCount.toLocaleString()} qualified plans observed an entry fill (${entryFillRate.toFixed(2)}%); ${trades.tp1HitCount.toLocaleString()} reached TP1 and ${trades.completedPlanCount.toLocaleString()} completed.`,
     `${trades.ambiguousPlanCount.toLocaleString()} plans were conservatively marked intrabar-ambiguous (${ambiguityRate.toFixed(2)}%).`,
+    `${analysis.sessionLiquiditySummary.sweepCount.toLocaleString()} meaningful liquidity sweeps and ${analysis.sessionLiquiditySummary.mssCount.toLocaleString()} market-structure shifts were detected; ${analysis.sessionLiquiditySummary.qmlRetestConfirmedCount.toLocaleString()} QML first/second-retest confirmations were observed.`,
   ];
 
   return {
@@ -143,6 +148,11 @@ export function createAnalysisReportSummary(
       signalLifecycle: analysis.latestSignalDecision?.lifecycle ?? "OBSERVING",
       tradePlanStatus: analysis.latestTradePlan?.status ?? "NO_SIGNAL",
       tradePlanAction: analysis.latestTradePlan?.action ?? "NONE",
+      activeSession: analysis.latestSessionLiquidity?.activeSession ?? "OFF_HOURS",
+      marketLocation: analysis.latestSessionLiquidity?.location ?? "UNAVAILABLE",
+      qmlStage: analysis.latestSessionLiquidity?.qml.stage ?? "NONE",
+      qmlDirection: analysis.latestSessionLiquidity?.qml.direction ?? "NEUTRAL",
+      qmlScore: analysis.latestSessionLiquidity?.qml.score ?? 0,
     },
     signalOverview: {
       confirmed: signals.confirmedSignalCount,
@@ -208,6 +218,11 @@ export function createAnalysisReportSummary(
       gradeBPlans: trades.gradeCounts.B,
       averageTradeQualityScore: trades.averageQualityScore,
       duplicateEpisodesSuppressed: trades.duplicateEpisodeCount,
+      liquiditySweeps: analysis.sessionLiquiditySummary.sweepCount,
+      structureMss: analysis.sessionLiquiditySummary.mssCount,
+      structureBos: analysis.sessionLiquiditySummary.bosCount,
+      qmlRetestConfirmed: analysis.sessionLiquiditySummary.qmlRetestConfirmedCount,
+      qmlInvalidated: analysis.sessionLiquiditySummary.qmlInvalidatedCount,
       qualificationRatePercent: qualificationRate,
       entryFillRatePercent: entryFillRate,
       tp1ProgressRatePercent: tp1ProgressRate,
@@ -296,6 +311,7 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
     engineConfiguration: {
       priceBehaviour: PRICE_BEHAVIOUR_CONFIG,
       multiTimeframeState: MULTI_TIMEFRAME_STATE_CONFIG,
+      sessionLiquidityQml: SESSION_LIQUIDITY_CONFIG,
       hypothesisOpportunity: HYPOTHESIS_OPPORTUNITY_CONFIG,
       signalDecision: SIGNAL_DECISION_CONFIG,
       tradeManagement: TRADE_MANAGEMENT_CONFIG,
@@ -309,6 +325,7 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
       candleBehaviour: analysis.behaviourSummaries,
       priceBehaviour: analysis.priceBehaviourSummaries,
       marketState: analysis.marketStateSummary,
+      sessionLiquidity: analysis.sessionLiquiditySummary,
       hypothesesAndOpportunities: analysis.hypothesisOpportunitySummary,
       signalDecision: analysis.signalDecisionSummary,
       tradeManagement: analysis.tradeManagementSummary,
@@ -374,6 +391,21 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
       ["Leading hypothesis", summary.latestContext.leadingHypothesis],
       ["Signal", `${summary.latestContext.signalAction} / ${summary.latestContext.signalLifecycle}`],
       ["Trade plan", `${summary.latestContext.tradePlanAction} / ${summary.latestContext.tradePlanStatus}`],
+      ["Active session", summary.latestContext.activeSession],
+      ["Market location", summary.latestContext.marketLocation],
+      ["QML state", `${summary.latestContext.qmlDirection} / ${summary.latestContext.qmlStage} / ${summary.latestContext.qmlScore}`],
+    ]),
+    "",
+    "## Session, liquidity and QML",
+    "",
+    markdownTable([
+      ["Liquidity sweeps", report.timeframeSummaries.sessionLiquidity.sweepCount],
+      ["Bullish sweeps", report.timeframeSummaries.sessionLiquidity.bullishSweepCount],
+      ["Bearish sweeps", report.timeframeSummaries.sessionLiquidity.bearishSweepCount],
+      ["BOS", report.timeframeSummaries.sessionLiquidity.bosCount],
+      ["MSS", report.timeframeSummaries.sessionLiquidity.mssCount],
+      ["QML retest confirmations", report.timeframeSummaries.sessionLiquidity.qmlRetestConfirmedCount],
+      ["QML invalidated", report.timeframeSummaries.sessionLiquidity.qmlInvalidatedCount],
     ]),
     "",
     "## Signals",

@@ -1,4 +1,4 @@
-# XAUUSD Finage Analyzer — Phase 1 through Phase 7
+# XAUUSD Finage Analyzer — Phase 1 through Phase 9
 
 A fresh Next.js application for one-click historical XAUUSD analysis using the Finage Forex Aggregates API.
 
@@ -7,15 +7,25 @@ This release intentionally has:
 - no PostgreSQL
 - no Prisma
 - no permanent WebSocket worker
-- no trading strategy
+- no broker-connected automatic trading
 - no automatic order execution
 - no future-candle lookahead
 
-The app fetches historical M1 candles on demand, validates and aggregates them, keeps the full dataset only in an expiring server-memory cache, and sends selected chart windows to the browser. Phase 2 measures individual candle structure. Phase 3 measures how price travels across candles. Phase 4 synchronizes 1D, rolling 5H, 1H, 15M, 5M and 1M responsibilities. Phase 5 ranks bullish, bearish and range hypotheses and evaluates four opportunity families. Phase 6 converts qualified opportunities into a closed-candle decision lifecycle. Phase 7 then creates or rejects an analytical entry, stop and target plan using structural risk, historical target space, configured execution-cost assumptions, no-chase and expiry controls. Live broker execution remains unavailable.
+The app fetches historical M1 candles on demand, validates and aggregates them, keeps the full dataset only in an expiring server-memory cache, and sends selected chart windows to the browser. Phase 2 measures individual candle structure. Phase 3 measures how price travels across candles. Phase 4 synchronizes 1D, rolling 5H, 1H, 15M, 5M and 1M responsibilities. Phase 5 ranks bullish, bearish and range hypotheses. Phase 6 converts qualified opportunities into a closed-candle decision lifecycle. Phase 7 creates or rejects an analytical entry, stop and target plan. Phase 8 adds sessions, major liquidity, sweep/reclaim and BOS/MSS. Phase 9 adds a contextual Session Liquidity QML reversal strategy with first/controlled-second retest execution and opposite-liquidity targets. Live broker execution remains unavailable.
 
 ## Medium Accuracy V1
 
 This release uses automatic warm-up context, removes closed-market/stale provider candles, classifies obstacles by structural importance, grades trade-ready plans as A/B/C, merges duplicate market episodes, and shows only deduplicated A/B BUY/SELL markers by default. Pattern-level Phase 6 events remain available as optional research markers. See `MEDIUM_ACCURACY_UPGRADE.md`.
+
+## Phase 8–9 Session Liquidity QML
+
+The executable reversal model is not generic visual QML. It requires meaningful mapped liquidity, sweep and reclaim, closed-candle MSS or exceptionally strong BOS, valid shoulder/head geometry, a first or controlled second retest, and usable opposite-side liquidity. The medium profile is designed to avoid both signal silence and M1 pattern flooding.
+
+See:
+
+- `PHASE8_SESSION_LIQUIDITY_ENGINE.md`
+- `PHASE9_SESSION_QML_ENGINE.md`
+- `QML_RELEASE_CHECKLIST.md`
 
 ## Architecture
 
@@ -41,6 +51,7 @@ Browser
   │       + hypothesis/opportunity snapshot at the same anchor
   │       + signal-decision snapshot at the same anchor
   │       + Phase 7 trade plan at the same anchor
+  │       + Phase 8–9 session/liquidity/QML snapshot
   │
   ├─ GET /api/market/state
   │    └─ synchronized Phase 4 state at an arbitrary historical timestamp
@@ -362,6 +373,9 @@ npm run verify:phase4
 npm run verify:phase5
 npm run verify:phase6
 npm run verify:phase7
+npm run verify:phase8
+npm run verify:phase9
+npm run verify:qml
 npm run benchmark:100k
 npm run benchmark:browser
 npm run build
@@ -399,6 +413,9 @@ npm start
 - `PHASE6_ENGINE_SPEC.md`
 - `PHASE7_RELEASE_CHECKLIST.md`
 - `PHASE7_ENGINE_SPEC.md`
+- `PHASE8_SESSION_LIQUIDITY_ENGINE.md`
+- `PHASE9_SESSION_QML_ENGINE.md`
+- `QML_RELEASE_CHECKLIST.md`
 - `IMPLEMENTATION_CHECKLIST.md`
 - `VERIFICATION_REPORT.md`
 - `BENCHMARK.md`
@@ -484,3 +501,34 @@ See:
 - `RESPONSIVE_AUDIT.md`
 - `RESPONSIVE_RELEASE_CHECKLIST.md`
 - `RESPONSIVE_VIEWPORT_AUDIT.json`
+
+## Medium Accuracy V1 profile
+
+The default release now separates Phase 6 research patterns from Phase 7 executable signals.
+
+- Trading view shows only deduplicated Grade A/B BUY/SELL markers.
+- Research patterns, continuations and invalidations are available through an optional research-mode toggle.
+- Minor M1 swings are soft target references instead of automatic trade vetoes.
+- M15/H1 structure remains a hard target-space constraint.
+- Timeframe Rotation is confluence-only rather than a standalone trade signal.
+- The engine automatically fetches prior warm-up context and prevents it from leaking into the selected chart/report interval.
+- Closed-market and conservative stale-provider candles are removed before aggregation.
+- Gap-unsafe source candles propagate incompleteness into higher timeframes.
+
+Run:
+
+```bash
+npm run verify:medium-accuracy
+```
+
+See `MEDIUM_ACCURACY_V1.md` for the grading, obstacle hierarchy and episode arbitration rules.
+
+## Phase 8–9 verification
+
+```bash
+npm run verify:phase8
+npm run verify:phase9
+npm run verify:qml
+```
+
+The Phase 8 verifier checks DST-aware sessions, completed previous-day/week references, reclaimed sweeps and closed-candle structure events. The Phase 9 verifier checks complete bullish and mirrored-bearish QML chains, first/second-retest limits, opposite-liquidity targeting, prefix no-lookahead, Phase 6 confirmation, Phase 7 A/B qualification and chart markers. Synthetic fixtures are software regressions only, not profitability evidence.

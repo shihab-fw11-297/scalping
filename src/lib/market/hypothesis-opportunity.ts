@@ -6,6 +6,11 @@ import {
   type MultiTimeframeStateIndex,
 } from "./multi-timeframe-state";
 import { analyzePriceBehaviourWindow } from "./price-behaviour";
+import {
+  getOrCreateSessionLiquidityIndex,
+  sessionLiquidityAtIndex,
+  type SessionLiquidityIndex,
+} from "./session-liquidity";
 import type {
   CompactCandle,
   HypothesisDirection,
@@ -27,6 +32,7 @@ import type {
   OpportunityStage,
   PriceBehaviour,
   PriceDirection,
+  SessionLiquiditySnapshot,
   Timeframe,
   TimeframeAlignment,
   TimeframeDataset,
@@ -55,6 +61,7 @@ const OPPORTUNITY_FAMILIES: readonly OpportunityFamily[] = [
   "FAILED_BREAK_REVERSAL",
   "IMPULSE_RELOAD",
   "TIMEFRAME_ROTATION",
+  "SESSION_LIQUIDITY_QML",
 ];
 const OPPORTUNITY_STAGES: readonly OpportunityStage[] = [
   "ABSENT",
@@ -73,6 +80,7 @@ interface ScoreAccumulator<E extends string> {
 
 export interface HypothesisOpportunityIndex {
   stateIndex: MultiTimeframeStateIndex;
+  sessionLiquidityIndex: SessionLiquidityIndex;
 }
 
 interface BuildOptions {
@@ -376,6 +384,8 @@ function finalOpportunity(input: Omit<OpportunityCandidate, "score" | "stage"> &
     if (item === "HIGH_LATE_ENTRY_RISK") return sum + 14;
     if (item === "EXTENDED_MOVE") return sum + 12;
     if (item === "MISSING_TRIGGER") return sum + 8;
+    if (item === "RETEST_NOT_CONFIRMED") return sum + 4;
+    if (item === "QML_INVALIDATED") return sum + 22;
     return sum;
   }, 0);
   const score = clamp(input.rawScore - penalty);
@@ -656,6 +666,105 @@ function timeframeRotation(
   });
 }
 
+function sessionLiquidityQml(
+  snapshot: MultiTimeframeStateSnapshot,
+  liquidity: SessionLiquiditySnapshot | null,
+): OpportunityCandidate {
+  const evidence: OpportunityEvidenceCode[] = [];
+  const blockers: OpportunityEvidenceCode[] = [];
+  const qml = liquidity?.qml ?? null;
+  const direction = qml?.direction ?? "NEUTRAL";
+  let contextScore = 0;
+  let developmentScore = 0;
+  let triggerScore = 0;
+
+  if (!liquidity?.dataReady || !qml) {
+    uniquePush(blockers, "PARTIAL_DATA");
+    return finalOpportunity({
+      family: "SESSION_LIQUIDITY_QML",
+      direction: "NEUTRAL",
+      rawScore: 0,
+      contextScore: 0,
+      developmentScore: 0,
+      triggerScore: 0,
+      freshnessScore: 0,
+      evidence,
+      blockers,
+      hasContext: false,
+      hasDevelopment: false,
+      hasTrigger: false,
+    });
+  }
+
+  if (qml.sweep) {
+    contextScore += 18 + qml.sweep.score * 0.18;
+    uniquePush(evidence, "MAJOR_LIQUIDITY_LOCATION");
+    uniquePush(evidence, "LIQUIDITY_SWEEP");
+    uniquePush(evidence, "LEVEL_RECLAIM");
+  }
+  if (liquidity.activeSession !== "OFF_HOURS") {
+    contextScore += liquidity.activeSession === "LONDON_NEW_YORK_OVERLAP" ? 12 : 8;
+    uniquePush(evidence, "ACTIVE_SESSION");
+  }
+  if (["RANGE_UPPER_EDGE", "RANGE_LOWER_EDGE", "UPPER_EXTERNAL_LIQUIDITY", "LOWER_EXTERNAL_LIQUIDITY", "ABOVE_PREVIOUS_DAY", "BELOW_PREVIOUS_DAY"].includes(liquidity.location)) {
+    contextScore += 12;
+    uniquePush(evidence, "FAVOURABLE_HOURLY_LOCATION");
+  } else if (liquidity.location === "RANGE_MIDDLE") {
+    contextScore -= 5;
+  }
+  if (qml.structureShift) {
+    developmentScore += qml.structureShift.type === "MSS" ? 25 : 17;
+    developmentScore += qml.structureShift.displacementScore * 0.12;
+    uniquePush(evidence, "MARKET_STRUCTURE_SHIFT");
+  }
+  if (qml.qmlLevel !== null) {
+    developmentScore += 12;
+    uniquePush(evidence, "QML_LEVEL_DEFINED");
+  }
+  if (qml.targetPrice !== null) {
+    triggerScore += 7;
+    uniquePush(evidence, "OPPOSITE_LIQUIDITY_TARGET");
+  }
+  if (qml.stage === "RETEST_CONFIRMED") {
+    triggerScore += 24;
+    if (qml.firstRetest) {
+      triggerScore += 8;
+      uniquePush(evidence, "FIRST_RETEST");
+    } else {
+      triggerScore += 3;
+      uniquePush(evidence, "SECOND_RETEST");
+    }
+    uniquePush(evidence, "FRESH_EXECUTION");
+  } else if (qml.stage === "MSS_CONFIRMED" || qml.stage === "RETEST_WAIT") {
+    uniquePush(blockers, "RETEST_NOT_CONFIRMED");
+  }
+
+  if (snapshot.composite.state === "NOISE" && snapshot.m1.quality === "NOISY") uniquePush(blockers, "NOISY_MARKET");
+  if (snapshot.composite.availableLayers < 4) uniquePush(blockers, "PARTIAL_DATA");
+  if (snapshot.composite.alignment === "DESTRUCTIVE_DISAGREEMENT" && snapshot.composite.evidenceScore >= 72) uniquePush(blockers, "DESTRUCTIVE_TIMEFRAME_CONFLICT");
+  if (qml.stage === "INVALIDATED" || qml.stage === "EXPIRED") uniquePush(blockers, "QML_INVALIDATED");
+
+  const freshness = Math.max(20, 100 - qml.ageBars * 6 - Math.max(0, qml.retestCount - 1) * 8);
+  const rawScore = contextScore + developmentScore + triggerScore + Math.max(0, qml.score - 60) * 0.22;
+  const hasContext = qml.stage !== "NONE" && qml.stage !== "INVALIDATED" && qml.stage !== "EXPIRED";
+  const hasDevelopment = qml.stage === "MSS_CONFIRMED" || qml.stage === "RETEST_WAIT" || qml.stage === "RETEST_CONFIRMED";
+  const hasTrigger = qml.stage === "RETEST_CONFIRMED";
+  return finalOpportunity({
+    family: "SESSION_LIQUIDITY_QML",
+    direction,
+    rawScore,
+    contextScore,
+    developmentScore,
+    triggerScore,
+    freshnessScore: freshness,
+    evidence,
+    blockers,
+    hasContext,
+    hasDevelopment,
+    hasTrigger,
+  });
+}
+
 function opportunityStageRank(stage: OpportunityStage): number {
   if (stage === "MATURE_CANDIDATE") return 5;
   if (stage === "DEVELOPING") return 4;
@@ -673,6 +782,7 @@ function availabilityFrom(opportunities: readonly OpportunityCandidate[]): Oppor
 export function evaluateHypothesesAndOpportunities(
   snapshot: MultiTimeframeStateSnapshot,
   feature: PriceBehaviour,
+  liquidity: SessionLiquiditySnapshot | null = null,
 ): HypothesisOpportunitySnapshot {
   const hypotheses = rankHypotheses(
     evaluateDirectionalHypothesis(snapshot, feature, "BULLISH"),
@@ -685,6 +795,7 @@ export function evaluateHypothesesAndOpportunities(
     failedBreakReversal(snapshot, feature),
     impulseReload(snapshot, feature),
     timeframeRotation(snapshot, feature),
+    sessionLiquidityQml(snapshot, liquidity),
   ].sort((a, b) =>
     opportunityStageRank(b.stage) - opportunityStageRank(a.stage) ||
     b.score - a.score ||
@@ -721,8 +832,10 @@ export function createHypothesisOpportunityIndex(
   datasets: Record<Timeframe, TimeframeDataset>,
   options: BuildOptions,
 ): HypothesisOpportunityIndex {
+  const stateIndex = getOrCreateMultiTimeframeStateIndex(datasets, options);
   return {
-    stateIndex: getOrCreateMultiTimeframeStateIndex(datasets, options),
+    stateIndex,
+    sessionLiquidityIndex: getOrCreateSessionLiquidityIndex(datasets, options.dailyBoundaryMode),
   };
 }
 
@@ -747,7 +860,11 @@ export function analyzeHypothesesAndOpportunitiesAt(
   const candleIndex = m1IndexAtOrBefore(m1Candles, state.timestampMs);
   if (candleIndex < 0) return null;
   const feature = analyzePriceBehaviourWindow(m1Candles, candleIndex, 1)[0];
-  return feature ? evaluateHypothesesAndOpportunities(state, feature) : null;
+  return feature ? evaluateHypothesesAndOpportunities(
+    state,
+    feature,
+    sessionLiquidityAtIndex(index.sessionLiquidityIndex, candleIndex),
+  ) : null;
 }
 
 function createCountRecord<T extends string>(values: readonly T[]): Record<T, number> {
@@ -771,9 +888,13 @@ export function summarizeHypothesesAndOpportunities(
   let bestScoreSamples = 0;
   let latest: HypothesisOpportunitySnapshot | null = null;
 
-  forEachMultiTimeframeState(index.stateIndex, (state, feature) => {
+  forEachMultiTimeframeState(index.stateIndex, (state, feature, candleIndex) => {
     if (state.timestampMs < fromTimestampMs || state.timestampMs >= toTimestampMs) return;
-    const result = evaluateHypothesesAndOpportunities(state, feature);
+    const result = evaluateHypothesesAndOpportunities(
+      state,
+      feature,
+      sessionLiquidityAtIndex(index.sessionLiquidityIndex, candleIndex),
+    );
     latest = result;
     sampleCount += 1;
     leadingScoreTotal += result.leadingHypothesisScore;
@@ -857,7 +978,7 @@ export function summarizeMarketStateAndOpportunities(
   let latestState: MultiTimeframeStateSnapshot | null = null;
   let latestOpportunity: HypothesisOpportunitySnapshot | null = null;
 
-  forEachMultiTimeframeState(index.stateIndex, (state, feature) => {
+  forEachMultiTimeframeState(index.stateIndex, (state, feature, candleIndex) => {
     latestState = state;
     sampleCount += 1;
     evidenceTotal += state.composite.evidenceScore;
@@ -874,7 +995,11 @@ export function summarizeMarketStateAndOpportunities(
       });
     }
 
-    const opportunity = evaluateHypothesesAndOpportunities(state, feature);
+    const opportunity = evaluateHypothesesAndOpportunities(
+      state,
+      feature,
+      sessionLiquidityAtIndex(index.sessionLiquidityIndex, candleIndex),
+    );
     latestOpportunity = opportunity;
     leadingScoreTotal += opportunity.leadingHypothesisScore;
     leadingHypothesisCounts[opportunity.leadingHypothesis] += 1;

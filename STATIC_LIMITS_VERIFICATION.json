@@ -1,0 +1,27 @@
+{
+  "release": "1.2.1-qml-static-limits",
+  "staticLimits": {
+    "finageMaxResultsPerRequest": 50000,
+    "appMaxCandles": 100000,
+    "appMaxWindowCandles": 5000,
+    "sourceFile": "src/lib/market/static-limits.ts",
+    "environmentOverrideDisabled": true
+  },
+  "verification": {
+    "staticLimitAudit": "passed",
+    "typescriptSyntaxFiles": 71,
+    "typescriptSyntax": "passed",
+    "responsiveRegression": "passed",
+    "serverlessRecoveryAudit": "passed",
+    "packageJson": "valid",
+    "zipExtraction": "passed"
+  },
+  "dependencyBackedBuild": {
+    "status": "not_run",
+    "reason": "node_modules were not available in the execution container"
+  },
+  "security": {
+    "apiKeyStillUsesEnvironment": true,
+    "apiKeyHardcoded": false
+  }
+}

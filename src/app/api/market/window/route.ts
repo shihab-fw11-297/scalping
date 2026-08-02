@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { resolveAnalysis } from "@/lib/market/analysis-recovery";
 import { ANALYSIS_RECOVERY_QUERY_SHAPE } from "@/lib/market/analysis-recovery-schema";
-import { getServerEnv } from "@/lib/market/env";
 import { createMarketWindow } from "@/lib/market/window";
+import { STATIC_RUNTIME_LIMITS } from "@/lib/market/static-limits";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,13 +47,12 @@ export async function GET(request: Request): Promise<Response> {
   }
   const analysis = resolved.analysis;
 
-  const env = getServerEnv();
   const window = createMarketWindow(
     analysis,
     parsed.data.timeframe,
     parsed.data.offset,
     parsed.data.limit,
-    env.APP_MAX_WINDOW_CANDLES,
+    STATIC_RUNTIME_LIMITS.APP_MAX_WINDOW_CANDLES,
   );
   return Response.json(
     { ...window, recoveredFromSource: resolved.recovered },

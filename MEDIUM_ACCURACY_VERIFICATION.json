@@ -1,11 +1,17 @@
 {
   "release": "MEDIUM_ACCURACY_V1",
-  "verifiedAtUtc": "2026-08-02T07:30:00.000Z",
+  "verifiedAtUtc": "2026-08-02T07:36:00.193445Z",
   "checks": {
+    "strictMarketCoreTypeScript": true,
+    "fullSourceScriptsTestsIntegrationTypeScript": true,
     "closedMarketFiltering": true,
     "staleQuoteFiltering": true,
     "warmupRangeSeparation": true,
+    "gapSafetyPropagation": true,
     "softM1ObstacleDoesNotVeto": true,
+    "mediumM5ObstacleDoesNotVeto": true,
+    "hardM15H1TargetLayer": true,
+    "qualityScoreCappedAt100": true,
     "timeframeRotationContextOnly": true,
     "ABMarkerFiltering": true,
     "phase3Regression": true,
@@ -26,17 +32,20 @@
     "gradeB": 15,
     "blocked": 77
   },
-  "syntheticPhase7Regression": {
-    "candles": 40000,
-    "plans": 133,
-    "qualified": 59,
-    "entered": 22,
-    "tradeReadyChartMarkers": 4,
-    "researchMarkers": 36
+  "reportWindowCheck": {
+    "ok": true,
+    "signalEvents": 446,
+    "tradePlans": 133,
+    "tradeReadyMarkers": 4,
+    "researchMarkers": 36,
+    "m5TradeReadyMarkers": 4,
+    "m5ResearchMarkers": 36,
+    "reportFindings": 6,
+    "reportMb": 0.59
   },
   "limitations": [
-    "Synthetic results validate logic and performance, not profitability.",
-    "Real Finage outcome calibration remains required.",
-    "The current environment could not complete npm package installation from the public registry."
+    "Synthetic results validate deterministic logic and signal volume, not profitability.",
+    "Real Finage outcome calibration must be regenerated with this new profile.",
+    "Dependency-backed next build could not run because the container registry lacks @types/node and public npm timed out."
   ]
 }

@@ -359,6 +359,7 @@ export interface MarketWindowResponse {
   hypothesisOpportunityAtWindowEnd: HypothesisOpportunitySnapshot | null;
   signalDecisionAtWindowEnd: SignalDecisionSnapshot | null;
   tradePlanAtWindowEnd: TradePlanSnapshot | null;
+  sessionLiquidityAtWindowEnd: SessionLiquiditySnapshot | null;
 }
 
 export interface AnalyzeMarketMeta {
@@ -369,7 +370,7 @@ export interface AnalyzeMarketMeta {
   contextFromUtc: string;
   warmupCalendarDays: number;
   warmupCandleCount: number;
-  analysisProfile: "MEDIUM_ACCURACY_V1";
+  analysisProfile: "MEDIUM_ACCURACY_V1" | "SESSION_LIQUIDITY_QML_V1";
   intervalSemantics: "[from,to)";
   sourceTimeframe: "M1";
   fetchChunks: number;
@@ -400,6 +401,8 @@ export interface AnalyzeMarketResponse {
   behaviourSummaries: Record<Timeframe, CandleBehaviourSummary>;
   priceBehaviourSummaries: Record<Timeframe, PriceBehaviourSummary>;
   marketStateSummary: MultiTimeframeStateSummary;
+  sessionLiquiditySummary: SessionLiquiditySummary;
+  latestSessionLiquidity: SessionLiquiditySnapshot | null;
   latestMarketState: MultiTimeframeStateSnapshot | null;
   hypothesisOpportunitySummary: HypothesisOpportunitySummary;
   latestHypothesisOpportunity: HypothesisOpportunitySnapshot | null;
@@ -424,6 +427,8 @@ export interface CachedAnalysis {
   behaviourSummaries: Record<Timeframe, CandleBehaviourSummary>;
   priceBehaviourSummaries: Record<Timeframe, PriceBehaviourSummary>;
   marketStateSummary: MultiTimeframeStateSummary;
+  sessionLiquiditySummary: SessionLiquiditySummary;
+  latestSessionLiquidity: SessionLiquiditySnapshot | null;
   latestMarketState: MultiTimeframeStateSnapshot | null;
   hypothesisOpportunitySummary: HypothesisOpportunitySummary;
   latestHypothesisOpportunity: HypothesisOpportunitySnapshot | null;
@@ -660,6 +665,167 @@ export interface MultiTimeframeStateSummary {
   strongestEvents: MultiTimeframeStateEvent[];
 }
 
+
+
+export type LiquidityLevelType =
+  | "PREVIOUS_DAY_HIGH"
+  | "PREVIOUS_DAY_LOW"
+  | "PREVIOUS_WEEK_HIGH"
+  | "PREVIOUS_WEEK_LOW"
+  | "ASIA_HIGH"
+  | "ASIA_LOW"
+  | "LONDON_HIGH"
+  | "LONDON_LOW"
+  | "NEW_YORK_HIGH"
+  | "NEW_YORK_LOW"
+  | "M15_SWING_HIGH"
+  | "M15_SWING_LOW"
+  | "H1_SWING_HIGH"
+  | "H1_SWING_LOW"
+  | "EQUAL_HIGHS"
+  | "EQUAL_LOWS";
+
+export type LiquidityLevelSide = "HIGH" | "LOW";
+export type LiquidityLevelStatus = "ACTIVE" | "SWEPT" | "BROKEN";
+
+export interface LiquidityLevelSnapshot {
+  id: string;
+  type: LiquidityLevelType;
+  side: LiquidityLevelSide;
+  price: number;
+  formedAtMs: number;
+  availableAtMs: number;
+  strength: number;
+  touches: number;
+  freshnessBars: number;
+  obstacleClass: ObstacleClass;
+  status: LiquidityLevelStatus;
+}
+
+export type StructureBreakType = "BOS" | "MSS";
+
+export interface LiquiditySweepSnapshot {
+  timestampMs: number;
+  direction: Exclude<OpportunityDirection, "NEUTRAL">;
+  levelId: string;
+  levelType: LiquidityLevelType;
+  levelPrice: number;
+  penetrationDistance: number;
+  penetrationInAverageRanges: number;
+  reclaimed: boolean;
+  reclaimStrength: number;
+  score: number;
+}
+
+export interface StructureShiftSnapshot {
+  timestampMs: number;
+  direction: Exclude<OpportunityDirection, "NEUTRAL">;
+  type: StructureBreakType;
+  brokenSwingPrice: number;
+  brokenSwingTimestampMs: number;
+  closeBeyondDistance: number;
+  displacementScore: number;
+  score: number;
+}
+
+export type QmlSetupStage =
+  | "NONE"
+  | "LIQUIDITY_SWEPT"
+  | "MSS_CONFIRMED"
+  | "RETEST_WAIT"
+  | "RETEST_CONFIRMED"
+  | "INVALIDATED"
+  | "EXPIRED";
+
+export type QmlReasonCode =
+  | "IMPORTANT_LIQUIDITY_SWEPT"
+  | "LEVEL_RECLAIMED"
+  | "MSS_BODY_CLOSE"
+  | "DISPLACEMENT_PRESENT"
+  | "QML_SHOULDER_IDENTIFIED"
+  | "FIRST_RETEST_CONFIRMED"
+  | "SECOND_RETEST_CONFIRMED"
+  | "ACTIVE_SESSION_CONTEXT"
+  | "OPPOSITE_LIQUIDITY_AVAILABLE"
+  | "COUNTER_HTF_PRESSURE"
+  | "MID_RANGE_LOCATION"
+  | "RETEST_TOO_LATE"
+  | "HEAD_INVALIDATED"
+  | "DATA_NOT_READY";
+
+export interface QmlSetupSnapshot {
+  timestampMs: number;
+  direction: OpportunityDirection;
+  stage: QmlSetupStage;
+  score: number;
+  sweep: LiquiditySweepSnapshot | null;
+  structureShift: StructureShiftSnapshot | null;
+  qmlLevel: number | null;
+  shoulderPrice: number | null;
+  headPrice: number | null;
+  invalidationPrice: number | null;
+  entryLower: number | null;
+  entryUpper: number | null;
+  targetPrice: number | null;
+  targetType: LiquidityLevelType | null;
+  retestCount: number;
+  firstRetest: boolean;
+  ageBars: number;
+  reasons: QmlReasonCode[];
+  blockers: QmlReasonCode[];
+}
+
+export type MarketLocationZone =
+  | "ABOVE_PREVIOUS_DAY"
+  | "UPPER_EXTERNAL_LIQUIDITY"
+  | "RANGE_UPPER_EDGE"
+  | "RANGE_MIDDLE"
+  | "RANGE_LOWER_EDGE"
+  | "LOWER_EXTERNAL_LIQUIDITY"
+  | "BELOW_PREVIOUS_DAY"
+  | "UNAVAILABLE";
+
+export interface SessionLiquiditySnapshot {
+  timestampMs: number;
+  activeSession: import("./trading-session").XauTradingSession;
+  location: MarketLocationZone;
+  previousDayHigh: number | null;
+  previousDayLow: number | null;
+  previousWeekHigh: number | null;
+  previousWeekLow: number | null;
+  asiaHigh: number | null;
+  asiaLow: number | null;
+  londonHigh: number | null;
+  londonLow: number | null;
+  newYorkHigh: number | null;
+  newYorkLow: number | null;
+  nearestLiquidityAbove: LiquidityLevelSnapshot | null;
+  nearestLiquidityBelow: LiquidityLevelSnapshot | null;
+  latestSweep: LiquiditySweepSnapshot | null;
+  latestStructureShift: StructureShiftSnapshot | null;
+  qml: QmlSetupSnapshot;
+  dataReady: boolean;
+}
+
+export interface SessionLiquiditySummary {
+  sampleCount: number;
+  dataReadySamples: number;
+  sweepCount: number;
+  bullishSweepCount: number;
+  bearishSweepCount: number;
+  bosCount: number;
+  mssCount: number;
+  qmlWatchCount: number;
+  qmlMssCount: number;
+  qmlRetestConfirmedCount: number;
+  qmlInvalidatedCount: number;
+  qmlExpiredCount: number;
+  qmlGradeReadyCount: number;
+  sessionCounts: Record<import("./trading-session").XauTradingSession, number>;
+  locationCounts: Record<MarketLocationZone, number>;
+  strongestQmlSetups: QmlSetupSnapshot[];
+}
+
 export type HypothesisDirection = "BULLISH" | "BEARISH" | "RANGE";
 
 export type HypothesisState =
@@ -718,7 +884,8 @@ export type OpportunityFamily =
   | "PRESSURE_RELEASE"
   | "FAILED_BREAK_REVERSAL"
   | "IMPULSE_RELOAD"
-  | "TIMEFRAME_ROTATION";
+  | "TIMEFRAME_ROTATION"
+  | "SESSION_LIQUIDITY_QML";
 
 export type OpportunityDirection = "BULLISH" | "BEARISH" | "NEUTRAL";
 
@@ -753,7 +920,18 @@ export type OpportunityEvidenceCode =
   | "PARTIAL_DATA"
   | "DIRECTION_CONFLICT"
   | "MISSING_TRIGGER"
-  | "EXTENDED_MOVE";
+  | "EXTENDED_MOVE"
+  | "MAJOR_LIQUIDITY_LOCATION"
+  | "LIQUIDITY_SWEEP"
+  | "LEVEL_RECLAIM"
+  | "MARKET_STRUCTURE_SHIFT"
+  | "QML_LEVEL_DEFINED"
+  | "FIRST_RETEST"
+  | "SECOND_RETEST"
+  | "ACTIVE_SESSION"
+  | "OPPOSITE_LIQUIDITY_TARGET"
+  | "RETEST_NOT_CONFIRMED"
+  | "QML_INVALIDATED";
 
 export interface OpportunityCandidate {
   family: OpportunityFamily;
@@ -982,6 +1160,7 @@ export type TradePlanReasonCode =
   | "MINIMUM_RR_PASSED"
   | "ENTRY_INSIDE_ZONE"
   | "ENTRY_WAITING_RETEST"
+  | "QML_SECOND_RETEST_ALLOWED"
   | "NO_CHASE_LIMIT_DEFINED"
   | "EXPIRY_DEFINED"
   | "EXPECTED_MOVEMENT_ESTIMATED"
@@ -1045,6 +1224,17 @@ export type TargetLevelSource =
   | "H1_SWING"
   | "M15_RANGE_BOUNDARY"
   | "H1_RANGE_BOUNDARY"
+  | "PREVIOUS_DAY_HIGH"
+  | "PREVIOUS_DAY_LOW"
+  | "PREVIOUS_WEEK_HIGH"
+  | "PREVIOUS_WEEK_LOW"
+  | "ASIA_HIGH"
+  | "ASIA_LOW"
+  | "LONDON_HIGH"
+  | "LONDON_LOW"
+  | "NEW_YORK_HIGH"
+  | "NEW_YORK_LOW"
+  | "QML_OPPOSITE_LIQUIDITY"
   | "EXPECTED_10M_CAPACITY"
   | "EXPANSION";
 
@@ -1280,6 +1470,11 @@ export interface AnalysisReportSummary {
     signalLifecycle: SignalLifecycleState;
     tradePlanStatus: TradePlanStatus;
     tradePlanAction: SignalAction;
+    activeSession: import("./trading-session").XauTradingSession;
+    marketLocation: MarketLocationZone;
+    qmlStage: QmlSetupStage;
+    qmlDirection: OpportunityDirection;
+    qmlScore: number;
   };
   signalOverview: {
     confirmed: number;
@@ -1352,6 +1547,7 @@ export interface AnalysisReport {
     candleBehaviour: Record<Timeframe, CandleBehaviourSummary>;
     priceBehaviour: Record<Timeframe, PriceBehaviourSummary>;
     marketState: MultiTimeframeStateSummary;
+    sessionLiquidity: SessionLiquiditySummary;
     hypothesesAndOpportunities: HypothesisOpportunitySummary;
     signalDecision: SignalDecisionSummary;
     tradeManagement: TradeManagementSummary;

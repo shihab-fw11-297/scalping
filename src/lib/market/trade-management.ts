@@ -13,6 +13,7 @@ import {
 } from "./signal-decision";
 import type { DailyBoundaryMode } from "./market-session";
 import { classifyXauTradingSession } from "./trading-session";
+import { sessionLiquidityAtIndex } from "./session-liquidity";
 import { TIMEFRAME_MS } from "./constants";
 import { getNextDailyBucketStart } from "./market-session";
 import type {
@@ -28,6 +29,7 @@ import type {
   OpportunityDirection,
   OpportunityFamily,
   PriceBehaviour,
+  SessionLiquiditySnapshot,
   SignalAction,
   StructuralRiskPlan,
   TargetLevelSource,
@@ -322,6 +324,7 @@ function familyExpiryBars(family: OpportunityFamily): number {
   if (family === "PRESSURE_RELEASE") return 2;
   if (family === "FAILED_BREAK_REVERSAL") return 3;
   if (family === "IMPULSE_RELOAD") return 4;
+  if (family === "SESSION_LIQUIDITY_QML") return 6;
   return 3;
 }
 
@@ -329,6 +332,7 @@ function structuralLookback(family: OpportunityFamily, feature: PriceBehaviour):
   if (family === "PRESSURE_RELEASE") return 5;
   if (family === "FAILED_BREAK_REVERSAL") return 10;
   if (family === "IMPULSE_RELOAD") return Math.max(5, Math.min(20, feature.pullbackBars + 3));
+  if (family === "SESSION_LIQUIDITY_QML") return 12;
   return 7;
 }
 
@@ -477,6 +481,7 @@ function nearestHistoricalObstacle(
   direction: Exclude<OpportunityDirection, "NEUTRAL">,
   entry: number,
   averageRange20: number,
+  liquidity: SessionLiquiditySnapshot | null = null,
 ): {
   nearest: HistoricalObstacle | null;
   decisionObstacle: HistoricalObstacle | null;
@@ -544,6 +549,35 @@ function nearestHistoricalObstacle(
     "H1_RANGE_BOUNDARY",
   );
 
+  if (liquidity) {
+    const contextual = [
+      [liquidity.previousDayHigh, "PREVIOUS_DAY_HIGH"],
+      [liquidity.previousDayLow, "PREVIOUS_DAY_LOW"],
+      [liquidity.previousWeekHigh, "PREVIOUS_WEEK_HIGH"],
+      [liquidity.previousWeekLow, "PREVIOUS_WEEK_LOW"],
+      [liquidity.asiaHigh, "ASIA_HIGH"],
+      [liquidity.asiaLow, "ASIA_LOW"],
+      [liquidity.londonHigh, "LONDON_HIGH"],
+      [liquidity.londonLow, "LONDON_LOW"],
+      [liquidity.newYorkHigh, "NEW_YORK_HIGH"],
+      [liquidity.newYorkLow, "NEW_YORK_LOW"],
+    ] as const;
+    for (const [price, source] of contextual) {
+      if (price === null) continue;
+      const inDirection = direction === "BULLISH" ? price > entry + minimumDistance : price < entry - minimumDistance;
+      if (inDirection) candidates.push({ price, source, obstacleClass: "HARD" });
+    }
+  }
+
+  const signalClose = datasets.M1.candles[signalIndex]?.[4] ?? entry;
+  const acceptanceBuffer = averageRange20 * 0.04;
+  for (const candidate of candidates) {
+    const alreadyAccepted = direction === "BULLISH"
+      ? candidate.price <= signalClose - acceptanceBuffer
+      : candidate.price >= signalClose + acceptanceBuffer;
+    if (alreadyAccepted) candidate.obstacleClass = "SOFT";
+  }
+
   let nearest: HistoricalObstacle | null = null;
   let nearestDistance = Number.POSITIVE_INFINITY;
   let decisionObstacle: HistoricalObstacle | null = null;
@@ -573,10 +607,14 @@ function entryReference(
   signalIndex: number,
   feature: PriceBehaviour,
   averageRange20: number,
+  liquidity: SessionLiquiditySnapshot | null,
 ): number {
   const candle = candles[signalIndex];
   const open = candle[1];
   const close = candle[4];
+  if (family === "SESSION_LIQUIDITY_QML" && liquidity?.qml.qmlLevel !== null && liquidity?.qml.qmlLevel !== undefined) {
+    return liquidity.qml.qmlLevel;
+  }
   if (family === "PRESSURE_RELEASE") {
     return feature.breakLevel ?? close - (direction === "BULLISH" ? 1 : -1) * averageRange20 * 0.08;
   }
@@ -605,7 +643,9 @@ function familyEntryHalfWidth(family: OpportunityFamily, averageRange20: number)
       ? 0.2
       : family === "IMPULSE_RELOAD"
         ? 0.25
-        : 0.2;
+        : family === "SESSION_LIQUIDITY_QML"
+          ? 0.2
+          : 0.2;
   return Math.max(averageRange20 * factor, 0.01);
 }
 
@@ -616,7 +656,9 @@ function familyNoChaseDistance(family: OpportunityFamily, averageRange20: number
       ? 0.8
       : family === "IMPULSE_RELOAD"
         ? 0.9
-        : 0.75;
+        : family === "SESSION_LIQUIDITY_QML"
+          ? 0.72
+          : 0.75;
   return Math.max(averageRange20 * factor, width * 2.5);
 }
 
@@ -634,6 +676,7 @@ function locationSuitability(
   const bearishEdge = zone === "RANGE_HIGH" || zone === "UPPER_QUARTILE" || zone === "ABOVE_RANGE";
   const favourableEdge = direction === "BULLISH" ? bullishEdge : bearishEdge;
   const wrongEdge = direction === "BULLISH" ? bearishEdge : bullishEdge;
+  if (family === "SESSION_LIQUIDITY_QML") return favourableEdge ? 12 : wrongEdge ? 3 : zone === "MID_RANGE" ? 5 : 8;
   if (family === "FAILED_BREAK_REVERSAL") return favourableEdge ? 10 : wrongEdge ? 1 : zone === "MID_RANGE" ? 2 : 5;
   if (family === "IMPULSE_RELOAD" || family === "PRESSURE_RELEASE") {
     if (state.hourly.condition === "WITH_TREND_PULLBACK") return 10;
@@ -650,17 +693,17 @@ function regimeCompatibility(
 ): number {
   switch (state.composite.state) {
     case "TREND_CONTINUATION":
-      return family === "IMPULSE_RELOAD" ? 20 : family === "PRESSURE_RELEASE" ? 18 : family === "TIMEFRAME_ROTATION" ? 11 : 7;
+      return family === "IMPULSE_RELOAD" ? 20 : family === "PRESSURE_RELEASE" ? 18 : family === "SESSION_LIQUIDITY_QML" ? 10 : family === "TIMEFRAME_ROTATION" ? 11 : 7;
     case "EXPANSION":
-      return family === "PRESSURE_RELEASE" ? 18 : family === "IMPULSE_RELOAD" ? 16 : family === "TIMEFRAME_ROTATION" ? 10 : 6;
+      return family === "PRESSURE_RELEASE" ? 18 : family === "IMPULSE_RELOAD" ? 16 : family === "SESSION_LIQUIDITY_QML" ? 9 : family === "TIMEFRAME_ROTATION" ? 10 : 6;
     case "CORRECTION":
-      return family === "IMPULSE_RELOAD" ? 19 : family === "FAILED_BREAK_REVERSAL" ? 15 : family === "TIMEFRAME_ROTATION" ? 14 : 12;
+      return family === "IMPULSE_RELOAD" ? 19 : family === "SESSION_LIQUIDITY_QML" ? 19 : family === "FAILED_BREAK_REVERSAL" ? 15 : family === "TIMEFRAME_ROTATION" ? 14 : 12;
     case "RANGE":
-      return family === "FAILED_BREAK_REVERSAL" ? 20 : family === "TIMEFRAME_ROTATION" ? 13 : family === "PRESSURE_RELEASE" ? 10 : 5;
+      return family === "SESSION_LIQUIDITY_QML" ? 20 : family === "FAILED_BREAK_REVERSAL" ? 20 : family === "TIMEFRAME_ROTATION" ? 13 : family === "PRESSURE_RELEASE" ? 10 : 5;
     case "ROTATION":
-      return family === "FAILED_BREAK_REVERSAL" ? 18 : family === "TIMEFRAME_ROTATION" ? 16 : family === "PRESSURE_RELEASE" ? 9 : 7;
+      return family === "SESSION_LIQUIDITY_QML" ? 20 : family === "FAILED_BREAK_REVERSAL" ? 18 : family === "TIMEFRAME_ROTATION" ? 16 : family === "PRESSURE_RELEASE" ? 9 : 7;
     case "COMPRESSION":
-      return family === "PRESSURE_RELEASE" ? 19 : family === "FAILED_BREAK_REVERSAL" ? 12 : family === "TIMEFRAME_ROTATION" ? 10 : 8;
+      return family === "PRESSURE_RELEASE" ? 19 : family === "SESSION_LIQUIDITY_QML" ? 13 : family === "FAILED_BREAK_REVERSAL" ? 12 : family === "TIMEFRAME_ROTATION" ? 10 : 8;
     case "TRANSITION": return 8;
     case "NOISE": return 0;
     case "INSUFFICIENT_DATA": return 2;
@@ -700,19 +743,23 @@ function evaluateTradeQuality(input: {
   targetSpace: TargetSpacePlan;
   structuralRisk: StructuralRiskPlan;
   blockers: readonly TradePlanRejectionCode[];
+  liquidity: SessionLiquiditySnapshot | null;
 }): TradeQualityAssessment {
   const session = classifyXauTradingSession(input.signalTimestampMs);
   const positiveReasons: string[] = [];
   const negativeReasons: string[] = [];
+  const qml = input.family === "SESSION_LIQUIDITY_QML" ? input.liquidity?.qml ?? null : null;
+  const qmlLocationBonus = qml?.sweep ? Math.min(6, qml.sweep.score * 0.06) : 0;
+  const qmlTimingBonus = qml?.firstRetest ? 4 : qml && qml.retestCount === 2 ? 1 : 0;
   const components: TradeQualityComponents = {
     pattern: clampComponent(input.candidateScore * 0.2, 20),
     regime: clampComponent(regimeCompatibility(input.family, input.state), 20),
-    location: clampComponent((input.state.hourly.locationQuality / 100) * 10 + locationSuitability(input.family, input.direction, input.state), 20),
+    location: clampComponent((input.state.hourly.locationQuality / 100) * 10 + locationSuitability(input.family, input.direction, input.state) + qmlLocationBonus, 20),
     alignment: clampComponent(alignmentComponent(input.direction, input.state), 15),
     timing: clampComponent(
       (input.feature.freshnessScore / 100) * 5 +
         (input.state.m5.freshnessScore / 100) * 5 +
-        (input.feature.lateEntryRisk === "LOW" ? 5 : input.feature.lateEntryRisk === "MEDIUM" ? 3 : 0),
+        (input.feature.lateEntryRisk === "LOW" ? 5 : input.feature.lateEntryRisk === "MEDIUM" ? 3 : 0) + qmlTimingBonus,
       15,
     ),
     target: clampComponent(
@@ -746,6 +793,12 @@ function evaluateTradeQuality(input: {
   if (input.state.composite.state === "NOISE" && (input.state.m5.state === "NOISY" || input.state.m1.quality === "NOISY")) {
     score = Math.min(score, 54);
     negativeReasons.push("MULTI_LAYER_NOISE");
+  }
+  if (input.family === "SESSION_LIQUIDITY_QML" && qml) {
+    if (qml.firstRetest) positiveReasons.push("QML_FIRST_RETEST");
+    if (qml.structureShift?.type === "MSS") positiveReasons.push("QML_MSS_CONFIRMED");
+    if (qml.targetType) positiveReasons.push("QML_OPPOSITE_LIQUIDITY_TARGET");
+    if (qml.retestCount > 1) negativeReasons.push("QML_SECOND_RETEST");
   }
   if (input.family === "TIMEFRAME_ROTATION") {
     score = Math.min(score, 64);
@@ -787,6 +840,7 @@ function buildStaticPlan(
   averageRange20: number,
   planId: number,
   settings: TradeManagementSettings,
+  liquidity: SessionLiquiditySnapshot | null,
 ): PlanRecord {
   const family = SIGNAL_OPPORTUNITY_FAMILIES[familyIndex];
   const candles = datasets.M1.candles;
@@ -803,9 +857,9 @@ function buildStaticPlan(
   const rejectionReasons: TradePlanRejectionCode[] = [];
   const limitations: TradePlanLimitationCode[] = [...LIMITATIONS];
   const width = familyEntryHalfWidth(family, averageRange20);
-  const preferred = entryReference(family, direction, candles, signalIndex, feature, averageRange20);
-  const lower = stable(preferred - width);
-  const upper = stable(preferred + width);
+  const preferred = entryReference(family, direction, candles, signalIndex, feature, averageRange20, liquidity);
+  const lower = stable(family === "SESSION_LIQUIDITY_QML" && liquidity?.qml.entryLower != null ? liquidity.qml.entryLower : preferred - width);
+  const upper = stable(family === "SESSION_LIQUIDITY_QML" && liquidity?.qml.entryUpper != null ? liquidity.qml.entryUpper : preferred + width);
   const expiryBars = familyExpiryBars(family);
   const noChaseDistance = familyNoChaseDistance(family, averageRange20, width);
   const noChasePrice = stable(preferred + (direction === "BULLISH" ? noChaseDistance : -noChaseDistance));
@@ -819,11 +873,14 @@ function buildStaticPlan(
   };
 
   const lookback = structuralLookback(family, feature);
-  const protectedExtreme = direction === "BULLISH"
-    ? extreme(candles, signalIndex, lookback, 3, "MIN")
-    : extreme(candles, signalIndex, lookback, 2, "MAX");
+  const qmlInvalidation = family === "SESSION_LIQUIDITY_QML" ? liquidity?.qml.invalidationPrice ?? null : null;
+  const protectedExtreme = qmlInvalidation !== null
+    ? qmlInvalidation
+    : direction === "BULLISH"
+      ? extreme(candles, signalIndex, lookback, 3, "MIN")
+      : extreme(candles, signalIndex, lookback, 2, "MAX");
   const buffer = Math.max(averageRange20 * TRADE_MANAGEMENT_CONFIG.safetyBufferAverageRange, 0.01);
-  const stopLossPrice = stable(protectedExtreme + (direction === "BULLISH" ? -buffer : buffer));
+  const stopLossPrice = stable(qmlInvalidation !== null ? qmlInvalidation : protectedExtreme + (direction === "BULLISH" ? -buffer : buffer));
   const riskDistance = stable(Math.abs(preferred - stopLossPrice));
   const riskInAverageRanges = averageRange20 > 0 ? riskDistance / averageRange20 : Number.POSITIVE_INFINITY;
   const executionCost = Math.max(0, settings.assumedSpreadPrice + settings.assumedSlippagePrice);
@@ -862,16 +919,22 @@ function buildStaticPlan(
     direction,
     preferred,
     averageRange20,
+    liquidity,
   );
   const obstacle = obstacleResult.nearest;
   const decisionObstacle = obstacleResult.decisionObstacle;
   const expected = expectedMovement(feature, averageRange20);
   const obstacleDistance = obstacle === null ? null : Math.abs(obstacle.price - preferred);
   const decisionObstacleDistance = decisionObstacle === null ? null : Math.abs(decisionObstacle.price - preferred);
-  const availableDistance = decisionObstacleDistance === null
-    ? expected.expected10MinuteDistance
-    : Math.min(decisionObstacleDistance, expected.expected10MinuteDistance);
-  const limitingFactor = decisionObstacleDistance !== null && decisionObstacleDistance <= expected.expected10MinuteDistance
+  const qmlTargetDistance = family === "SESSION_LIQUIDITY_QML" && liquidity?.qml.targetPrice != null
+    ? Math.abs(liquidity.qml.targetPrice - preferred)
+    : null;
+  const availableDistance = qmlTargetDistance !== null
+    ? qmlTargetDistance
+    : decisionObstacleDistance === null
+      ? expected.expected10MinuteDistance
+      : Math.min(decisionObstacleDistance, expected.expected10MinuteDistance);
+  const limitingFactor = qmlTargetDistance !== null || (decisionObstacleDistance !== null && decisionObstacleDistance <= expected.expected10MinuteDistance)
     ? "HISTORICAL_OBSTACLE" as const
     : "EXPECTED_10M_CAPACITY" as const;
   const availableRiskReward = totalRiskWithCosts > 0
@@ -900,9 +963,11 @@ function buildStaticPlan(
       price: stable(preferred + sign * target2Distance),
       rewardDistance: stable(target2Distance),
       riskReward: stable(Math.max(0, target2Distance - executionCost) / totalRiskWithCosts),
-      source: limitingFactor === "HISTORICAL_OBSTACLE"
-        ? decisionObstacle?.source ?? "EXPECTED_10M_CAPACITY"
-        : "EXPECTED_10M_CAPACITY",
+      source: family === "SESSION_LIQUIDITY_QML" && qmlTargetDistance !== null
+        ? "QML_OPPOSITE_LIQUIDITY"
+        : limitingFactor === "HISTORICAL_OBSTACLE"
+          ? decisionObstacle?.source ?? "EXPECTED_10M_CAPACITY"
+          : "EXPECTED_10M_CAPACITY",
     });
   }
   const target3Distance = Math.min(availableDistance * 0.98, riskDistance * 3.5);
@@ -912,9 +977,11 @@ function buildStaticPlan(
       price: stable(preferred + sign * target3Distance),
       rewardDistance: stable(target3Distance),
       riskReward: stable(Math.max(0, target3Distance - executionCost) / totalRiskWithCosts),
-      source: limitingFactor === "HISTORICAL_OBSTACLE"
-        ? decisionObstacle?.source ?? "EXPANSION"
-        : "EXPANSION",
+      source: family === "SESSION_LIQUIDITY_QML" && qmlTargetDistance !== null
+        ? "QML_OPPOSITE_LIQUIDITY"
+        : limitingFactor === "HISTORICAL_OBSTACLE"
+          ? decisionObstacle?.source ?? "EXPANSION"
+          : "EXPANSION",
     });
   }
   const targetSpace: TargetSpacePlan = {
@@ -940,7 +1007,15 @@ function buildStaticPlan(
 
   const close = candle[4];
   const beyondNoChase = direction === "BULLISH" ? close > noChasePrice : close < noChasePrice;
-  if (beyondNoChase) rejectionReasons.push("ENTRY_ALREADY_LATE");
+  const qmlConfirmedRetestAllowance = family === "SESSION_LIQUIDITY_QML" &&
+    liquidity?.qml.stage === "RETEST_CONFIRMED" &&
+    liquidity.qml.retestCount >= 1 &&
+    liquidity.qml.retestCount <= 2 &&
+    Math.abs(close - preferred) <= averageRange20 * 1.25;
+  if (beyondNoChase && !qmlConfirmedRetestAllowance) rejectionReasons.push("ENTRY_ALREADY_LATE");
+  if (beyondNoChase && qmlConfirmedRetestAllowance && liquidity?.qml.retestCount === 2) {
+    reasons.push("QML_SECOND_RETEST_ALLOWED");
+  }
   const inside = close >= lower && close <= upper;
   if (inside) reasons.push("ENTRY_INSIDE_ZONE");
   else reasons.push("ENTRY_WAITING_RETEST");
@@ -956,6 +1031,7 @@ function buildStaticPlan(
     targetSpace,
     structuralRisk,
     blockers: structuralBlockers,
+    liquidity,
   });
   if (family === "TIMEFRAME_ROTATION") rejectionReasons.push("TIMEFRAME_ROTATION_CONTEXT_ONLY");
   else if (quality.grade === "C") rejectionReasons.push("QUALITY_BELOW_MEDIUM");
@@ -1448,6 +1524,7 @@ function buildIndex(signalIndex: SignalDecisionIndex, settings: TradeManagementS
           averageRange20,
           plans.length,
           settings,
+          sessionLiquidityAtIndex(signalIndex.sessionLiquidityIndex, candleIndex),
         );
         if (signal.lifecycle === "CONTINUATION") {
           plan.reasons = plan.reasons.filter((reason) => reason !== "PHASE6_CONFIRMED");
@@ -1705,6 +1782,7 @@ function familyShortLabel(family: OpportunityFamily): string {
   if (family === "PRESSURE_RELEASE") return "PR";
   if (family === "FAILED_BREAK_REVERSAL") return "FBR";
   if (family === "IMPULSE_RELOAD") return "IR";
+  if (family === "SESSION_LIQUIDITY_QML") return "QML";
   return "TR";
 }
 
@@ -1860,6 +1938,7 @@ export function simulateTradePlanCreation(input: TradePlanCreationInput): TradeP
     averageRange20,
     0,
     resolveSettings(input.settings),
+    null,
   );
   const status = plan.initialStatus;
   return {
