@@ -174,7 +174,7 @@ export async function analyzeHistoricalMarket(
         symbol: env.FINAGE_XAUUSD_SYMBOL,
         fromDate: chunk.fromDate,
         toDate: chunk.toDate,
-        limit: env.FINAGE_MAX_RESULTS_PER_REQUEST,
+        limit:35000,
         timeoutMs: env.FINAGE_REQUEST_TIMEOUT_MS,
         sort: env.FINAGE_SORT === "provider_default" ? undefined : env.FINAGE_SORT,
         dateFormat:
