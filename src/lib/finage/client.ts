@@ -4,6 +4,7 @@ import {
 } from "./schema";
 import type { FinageAggregateResponse } from "./schema";
 import type { FinageRawAggregate } from "@/lib/market/types";
+import { STATIC_RUNTIME_LIMITS } from "@/lib/market/static-limits";
 
 export class FinageApiError extends Error {
   constructor(
@@ -64,11 +65,33 @@ export function buildFinageM1AggregateUrl(
 
   const normalizedApiKey = apiKey.trim();
   if (!normalizedApiKey) throw new FinageApiError("FINAGE_API_KEY is empty.");
-  if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) {
-    throw new FinageApiError("Finage limit must be an integer from 1 to 50000.");
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST
+  ) {
+    throw new FinageApiError(
+      `Finage limit must be an integer from 1 to ` +
+        `${STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST}.`,
+    );
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate)) {
     throw new FinageApiError("Finage fromDate/toDate must use YYYY-MM-DD.");
+  }
+
+  const fromDayMs = Date.parse(`${fromDate}T00:00:00.000Z`);
+  const toDayMs = Date.parse(`${toDate}T00:00:00.000Z`);
+  if (!Number.isFinite(fromDayMs) || !Number.isFinite(toDayMs) || toDayMs < fromDayMs) {
+    throw new FinageApiError("Finage toDate must be on or after fromDate.");
+  }
+  const inclusiveCalendarDays =
+    Math.floor((toDayMs - fromDayMs) / 86_400_000) + 1;
+  if (inclusiveCalendarDays > STATIC_RUNTIME_LIMITS.FINAGE_M1_REQUEST_CALENDAR_DAYS) {
+    throw new FinageApiError(
+      `Finage M1 requests are hard-limited to ` +
+        `${STATIC_RUNTIME_LIMITS.FINAGE_M1_REQUEST_CALENDAR_DAYS} calendar days; ` +
+        `received ${fromDate}..${toDate} (${inclusiveCalendarDays} days).`,
+    );
   }
 
   const normalizedBaseUrl = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
@@ -77,8 +100,8 @@ export function buildFinageM1AggregateUrl(
     normalizedBaseUrl,
   );
 
-  // Keep the default request identical to Finage's documented URL shape:
-  // ?apikey=...&limit=50000
+  // Keep the request in Finage's documented URL shape:
+  // ?apikey=...&limit=<configured-safe-limit>
   url.searchParams.set("apikey", normalizedApiKey);
   url.searchParams.set("limit", String(limit));
   if (sort) url.searchParams.set("sort", sort);

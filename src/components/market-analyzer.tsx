@@ -17,6 +17,7 @@ import type {
   AnalysisReportBundle,
   AnalyzeMarketResponse,
   MarketWindowResponse,
+  SignalOriginTimeframe,
   Timeframe,
 } from "@/lib/market/types";
 
@@ -141,6 +142,7 @@ export function MarketAnalyzer() {
   const [showInvalidations, setShowInvalidations] = useState(false);
   const [showTradeLevels, setShowTradeLevels] = useState(true);
   const [showLiquidityLevels, setShowLiquidityLevels] = useState(true);
+  const [showOriginTimeframes, setShowOriginTimeframes] = useState<Record<SignalOriginTimeframe, boolean>>({ M1: true, M5: true, M15: true });
   const windowRequestSequence = useRef(0);
 
   const total = result?.timeframes[timeframe].candleCount ?? 0;
@@ -466,8 +468,8 @@ export function MarketAnalyzer() {
 
             <div className="marker-toolbar">
               <div className="marker-summary">
-                <strong>Medium-accuracy trade markers</strong>
-                <span>{windowData.signalMarkers.length.toLocaleString()} deduplicated A/B signals · {windowData.researchSignalMarkers.length.toLocaleString()} research events</span>
+                <strong>Phase 12 native multi-timeframe markers</strong>
+                <span>{windowData.signalMarkers.length.toLocaleString()} A/B paper signals in window · {windowData.researchSignalMarkers.length.toLocaleString()} blocked/research events</span>
               </div>
               <label className="toggle-control">
                 <input type="checkbox" checked={showGradeA} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowGradeA(event.target.checked)} />
@@ -477,9 +479,19 @@ export function MarketAnalyzer() {
                 <input type="checkbox" checked={showGradeB} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowGradeB(event.target.checked)} />
                 Grade B signals
               </label>
+              {(["M1", "M5", "M15"] as SignalOriginTimeframe[]).map((origin) => (
+                <label className="toggle-control" key={origin}>
+                  <input
+                    type="checkbox"
+                    checked={showOriginTimeframes[origin]}
+                    onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowOriginTimeframes((previous) => ({ ...previous, [origin]: event.target.checked }))}
+                  />
+                  {origin}-origin signals
+                </label>
+              ))}
               <label className="toggle-control">
                 <input type="checkbox" checked={showResearchSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowResearchSignals(event.target.checked)} />
-                Phase 6 research markers
+                Blocked + research markers
               </label>
               <label className="toggle-control">
                 <input type="checkbox" checked={showInvalidations} disabled={!showResearchSignals} onChange={(event: React.ChangeEvent<HTMLInputElement>) => setShowInvalidations(event.target.checked)} />
@@ -506,6 +518,21 @@ export function MarketAnalyzer() {
                   setShowResearchSignals(false);
                   setShowInvalidations(false);
                 }}>Trading view</button>
+              </div>
+            </div>
+
+            <div className="range-control signal-navigation">
+              <div>
+                <strong>Phase 12 signal navigation</strong>
+                <span>
+                  {windowData.signalNavigation.signalsInWindow.toLocaleString()} in this window · {windowData.signalNavigation.totalSignalsInPeriod.toLocaleString()} total · M1 {windowData.signalNavigation.originCounts.M1} / M5 {windowData.signalNavigation.originCounts.M5} / M15 {windowData.signalNavigation.originCounts.M15}
+                </span>
+              </div>
+              <div className="actions range-actions">
+                <button type="button" className="secondary" disabled={loadingWindow || windowData.signalNavigation.firstSignalOffset === null} onClick={() => windowData.signalNavigation.firstSignalOffset !== null && void loadWindow(timeframe, windowData.signalNavigation.firstSignalOffset, windowSize)}>First signal</button>
+                <button type="button" className="secondary" disabled={loadingWindow || windowData.signalNavigation.previousSignalOffset === null} onClick={() => windowData.signalNavigation.previousSignalOffset !== null && void loadWindow(timeframe, windowData.signalNavigation.previousSignalOffset, windowSize)}>Previous signal</button>
+                <button type="button" className="secondary" disabled={loadingWindow || windowData.signalNavigation.nextSignalOffset === null} onClick={() => windowData.signalNavigation.nextSignalOffset !== null && void loadWindow(timeframe, windowData.signalNavigation.nextSignalOffset, windowSize)}>Next signal</button>
+                <button type="button" className="secondary" disabled={loadingWindow || windowData.signalNavigation.lastSignalOffset === null} onClick={() => windowData.signalNavigation.lastSignalOffset !== null && void loadWindow(timeframe, windowData.signalNavigation.lastSignalOffset, windowSize)}>Last signal</button>
               </div>
             </div>
 
@@ -565,6 +592,7 @@ export function MarketAnalyzer() {
               showInvalidations={showInvalidations}
               showTradeLevels={showTradeLevels}
               showLiquidityLevels={showLiquidityLevels}
+              showOriginTimeframes={showOriginTimeframes}
             />
             <DataTable
               candles={windowData.candles}

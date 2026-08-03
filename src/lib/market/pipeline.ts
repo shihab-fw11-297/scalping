@@ -1,4 +1,3 @@
-import { fetchFinageM1AggregateResponse } from "@/lib/finage/client";
 import { aggregateAllTimeframes, calculateLatestRollingWindow } from "./aggregate";
 import { createVisibleRanges, sliceVisibleDataset } from "./analysis-range";
 import { analysisCache } from "./analysis-cache";
@@ -13,15 +12,21 @@ import {
 import {
   DEFAULT_TRADE_MANAGEMENT_SETTINGS,
   analyzeTradeManagementAt,
+  createTradePlanHistory,
   getOrCreateTradeManagementIndex,
   summarizeTradeManagementRange,
 } from "./trade-management";
 import { planFinageDateChunks } from "./chunk-plan";
 import { mapWithConcurrency } from "./concurrency";
+import { fetchFinageChunkAdaptive } from "./finage-chunk-fetch";
 import { ALL_TIMEFRAMES } from "./constants";
 import { getServerEnv } from "./env";
 import { STATIC_RUNTIME_LIMITS } from "./static-limits";
-import { describeDailyBoundary, type WeekendSchedule } from "./market-session";
+import {
+  countExpectedMarketMinutes,
+  describeDailyBoundary,
+  type WeekendSchedule,
+} from "./market-session";
 import {
   analyzeMultiTimeframeStateAt,
   summarizeMultiTimeframeStates,
@@ -36,7 +41,7 @@ import {
   summarizeSignalDecisionRange,
 } from "./signal-decision";
 import { detectGaps } from "./gaps";
-import { dedupeSortedCandles, normalizeFinageAggregates } from "./normalize";
+import { mergeAndDedupeCandleChunks, normalizeFinageAggregates } from "./normalize";
 import type {
   AnalyzeMarketResponse,
   AnalysisRecoveryRequest,
@@ -50,6 +55,7 @@ import type {
   VisibleDatasetRange,
 } from "./types";
 import { createMarketWindow } from "./window";
+import { createPhase12MultiTimeframeReport } from "./phase12-multi-timeframe";
 
 export interface AnalyzeRequest {
   fromUtc: string;
@@ -121,12 +127,41 @@ function resolveWarmupCalendarDays(
 
 function createWeekendSchedule(env: ReturnType<typeof getServerEnv>): WeekendSchedule {
   return env.FOREX_WEEKEND_MODE === "NEW_YORK_17"
-    ? { mode: "NEW_YORK_17" }
+    ? {
+        mode: "NEW_YORK_17",
+        // Finage can emit sparse XAUUSD placeholders during the daily gold
+        // maintenance break. Remove them as expected closed-market records.
+        dailyMaintenance: "NEW_YORK_17_TO_18",
+      }
     : {
         mode: "FIXED_UTC",
         fridayCloseUtcHour: env.FOREX_FRIDAY_CLOSE_UTC_HOUR,
         sundayOpenUtcHour: env.FOREX_SUNDAY_OPEN_UTC_HOUR,
       };
+}
+
+function assertMinimumM1Coverage(
+  label: string,
+  actualCandles: number,
+  expectedTradableCandles: number,
+): number {
+  const coveragePercent = expectedTradableCandles === 0
+    ? 100
+    : (actualCandles / expectedTradableCandles) * 100;
+  if (
+    coveragePercent <
+    STATIC_RUNTIME_LIMITS.MINIMUM_ANALYSIS_M1_COVERAGE_PERCENT
+  ) {
+    const missing = Math.max(0, expectedTradableCandles - actualCandles);
+    throw new Error(
+      `Analysis blocked: ${label} Finage M1 coverage is ${coveragePercent.toFixed(2)}% ` +
+        `(${actualCandles.toLocaleString()}/${expectedTradableCandles.toLocaleString()} ` +
+        `tradable minutes; ${missing.toLocaleString()} missing). ` +
+        `At least ${STATIC_RUNTIME_LIMITS.MINIMUM_ANALYSIS_M1_COVERAGE_PERCENT}% is required ` +
+        `for a meaningful backtest or optimisation.`,
+    );
+  }
+  return coveragePercent;
 }
 
 export async function analyzeHistoricalMarket(
@@ -149,6 +184,10 @@ export async function analyzeHistoricalMarket(
   if (toTimestampMs <= fromTimestampMs) {
     throw new Error("The end datetime must be later than the start datetime.");
   }
+  const latestClosedMinuteMs = Math.floor(Date.now() / 60_000) * 60_000;
+  if (toTimestampMs > latestClosedMinuteMs) {
+    throw new Error("Historical analysis end time cannot be in the future or inside the current incomplete minute.");
+  }
 
   const calendarDays = (toTimestampMs - fromTimestampMs) / 86_400_000;
   if (calendarDays > 120) {
@@ -162,23 +201,37 @@ export async function analyzeHistoricalMarket(
   );
   const contextFromTimestampMs = fromTimestampMs - warmupCalendarDays * 86_400_000;
 
-  const chunks = planFinageDateChunks({
+  const plannedChunks = planFinageDateChunks({
     fromTimestampMs: contextFromTimestampMs,
     toTimestampMs,
     multiplierMinutes: 1,
     targetMaxResults: STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
+    maximumCalendarDaysPerChunk:
+      STATIC_RUNTIME_LIMITS.FINAGE_M1_CHUNK_CALENDAR_DAYS,
   });
 
-  const rawChunks = await mapWithConcurrency(
-    chunks,
-    env.FINAGE_FETCH_CONCURRENCY,
-    async (chunk) => {
-      const response = await fetchFinageM1AggregateResponse({
+  console.info("[Finage API] M1 chunk plan", {
+    fromDate: plannedChunks[0]?.fromDate ?? null,
+    toDate: plannedChunks.at(-1)?.toDate ?? null,
+    plannedChunks: plannedChunks.length,
+    maximumCalendarDaysPerChunk:
+      STATIC_RUNTIME_LIMITS.FINAGE_M1_CHUNK_CALENDAR_DAYS,
+    limitPerRequest: STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
+    concurrency: STATIC_RUNTIME_LIMITS.FINAGE_FETCH_CONCURRENCY,
+  });
+
+  const adaptiveFetches = await mapWithConcurrency(
+    plannedChunks,
+    STATIC_RUNTIME_LIMITS.FINAGE_FETCH_CONCURRENCY,
+    async (chunk) =>
+      fetchFinageChunkAdaptive({
+        chunk,
+        minimumCalendarDays:
+          STATIC_RUNTIME_LIMITS.FINAGE_M1_MIN_CHUNK_CALENDAR_DAYS,
+        maximumSplitDepth: STATIC_RUNTIME_LIMITS.FINAGE_M1_MAX_SPLIT_DEPTH,
         baseUrl: env.FINAGE_REST_BASE_URL,
         apiKey: env.FINAGE_API_KEY,
         symbol: env.FINAGE_XAUUSD_SYMBOL,
-        fromDate: chunk.fromDate,
-        toDate: chunk.toDate,
         limit: STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
         timeoutMs: env.FINAGE_REQUEST_TIMEOUT_MS,
         sort: env.FINAGE_SORT === "provider_default" ? undefined : env.FINAGE_SORT,
@@ -186,19 +239,21 @@ export async function analyzeHistoricalMarket(
           env.FINAGE_DATE_FORMAT === "provider_default"
             ? undefined
             : env.FINAGE_DATE_FORMAT,
-      });
-      if (
-        response.totalResults !== undefined &&
-        response.totalResults > response.results.length
-      ) {
-        throw new Error(
-          `Finage chunk ${chunk.fromDate}..${chunk.toDate} was truncated: ` +
-            `${response.results.length}/${response.totalResults} records received.`,
-        );
-      }
-      return response.results;
-    },
+      }),
   );
+
+  const fetchedChunks = adaptiveFetches.flatMap((fetchResult) => fetchResult.leaves);
+  const adaptiveSplitCount = adaptiveFetches.reduce(
+    (sum, fetchResult) => sum + fetchResult.splitCount,
+    0,
+  );
+  if (adaptiveSplitCount > 0) {
+    console.warn("[Finage API] Adaptive M1 chunk recovery applied", {
+      plannedChunks: plannedChunks.length,
+      completedChunks: fetchedChunks.length,
+      adaptiveSplitCount,
+    });
+  }
 
   let received = 0;
   let outOfOrderDetected = false;
@@ -207,12 +262,18 @@ export async function analyzeHistoricalMarket(
   const normalizedChunks: CompactCandle[][] = [];
   const issues: DataIssue[] = [];
 
-  for (const rawChunk of rawChunks) {
+  for (const fetchedChunk of fetchedChunks) {
+    const rawChunk = fetchedChunk.results;
     received += rawChunk.length;
+    const chunkFromTimestampMs = Date.parse(
+      `${fetchedChunk.chunk.fromDate}T00:00:00.000Z`,
+    );
+    const chunkToTimestampMs =
+      Date.parse(`${fetchedChunk.chunk.toDate}T00:00:00.000Z`) + 86_400_000;
     const normalized = normalizeFinageAggregates(
       rawChunk,
-      contextFromTimestampMs,
-      toTimestampMs,
+      Math.max(contextFromTimestampMs, chunkFromTimestampMs),
+      Math.min(toTimestampMs, chunkToTimestampMs),
     );
     normalizedChunks.push(normalized.candles);
     invalidRecords += normalized.issues.length;
@@ -223,10 +284,10 @@ export async function analyzeHistoricalMarket(
     }
   }
 
-  const combined: CompactCandle[] = [];
-  for (const normalized of normalizedChunks) combined.push(...normalized);
-
-  const deduped = dedupeSortedCandles(combined);
+  // Keep the adjacent deduper correct even if a retry path or future chunk
+  // executor returns individually sorted leaves in a different order.
+  const deduped = mergeAndDedupeCandleChunks(normalizedChunks);
+  outOfOrderDetected ||= deduped.outOfOrderDetected;
   if (issues.length < 100) {
     issues.push(...deduped.conflictIssues.slice(0, 100 - issues.length));
   }
@@ -249,6 +310,17 @@ export async function analyzeHistoricalMarket(
         `--from/--to range and confirm your Finage plan includes historical XAUUSD M1 data.`,
     );
   }
+
+  const contextExpectedMinutes = countExpectedMarketMinutes(
+    contextFromTimestampMs,
+    toTimestampMs,
+    weekendSchedule,
+  );
+  assertMinimumM1Coverage(
+    "analysis context",
+    cleaned.candles.length,
+    contextExpectedMinutes.tradable,
+  );
 
   const gapResult = detectGaps(cleaned.candles, 60_000, weekendSchedule);
   const m1CompletenessResult = createM1CompletenessWithGapSafety(
@@ -278,6 +350,18 @@ export async function analyzeHistoricalMarket(
       sliceVisibleDataset(datasets[timeframe], visibleRanges[timeframe]),
     ]),
   ) as Record<Timeframe, TimeframeDataset>;
+
+  const selectedExpectedMinutes = countExpectedMarketMinutes(
+    fromTimestampMs,
+    toTimestampMs,
+    weekendSchedule,
+  );
+  const visibleM1Candles = selectedDatasets.M1.candles.length;
+  assertMinimumM1Coverage(
+    "selected range",
+    visibleM1Candles,
+    selectedExpectedMinutes.tradable,
+  );
 
   const rolling5hLatest = calculateLatestRollingWindow(cleaned.candles, 300);
   const behaviourSummaries = {
@@ -349,8 +433,11 @@ export async function analyzeHistoricalMarket(
   const selectedGaps = gapResult.gaps.filter(
     (gap) => gap.toTimestampMs >= fromTimestampMs && gap.fromTimestampMs < toTimestampMs,
   );
-  const selectedMissingTradable = selectedGaps.reduce((sum, gap) => sum + gap.missingTradableCandles, 0);
-  const selectedExpectedClosed = selectedGaps.reduce((sum, gap) => sum + gap.expectedClosedCandles, 0);
+  const selectedMissingTradable = Math.max(
+    0,
+    selectedExpectedMinutes.tradable - visibleM1Candles,
+  );
+  const selectedExpectedClosed = selectedExpectedMinutes.closed;
 
   const processingMs = Math.round((performance.now() - startedAt) * 100) / 100;
   const ttlMs = env.ANALYSIS_CACHE_TTL_MINUTES * 60_000;
@@ -366,7 +453,9 @@ export async function analyzeHistoricalMarket(
     analysisProfile: "SESSION_LIQUIDITY_QML_V1" as const,
     intervalSemantics: "[from,to)" as const,
     sourceTimeframe: "M1" as const,
-    fetchChunks: chunks.length,
+    fetchChunks: fetchedChunks.length,
+    plannedFetchChunks: plannedChunks.length,
+    adaptiveSplitCount,
     processingMs,
     cacheExpiresAtUtc,
     weekendScheduleMode: env.FOREX_WEEKEND_MODE,
@@ -396,6 +485,23 @@ export async function analyzeHistoricalMarket(
     issueSamples: issues.slice(0, 25),
     gapSamples: selectedGaps.slice(0, 50),
   };
+  const phase12TradeHistory = createTradePlanHistory(
+    tradeManagementIndex,
+    "phase12-pending",
+    0,
+    Math.max(1, tradeManagementIndex.plans.length),
+    Math.max(1, tradeManagementIndex.plans.length),
+    fromTimestampMs,
+    toTimestampMs,
+  );
+  const phase12 = createPhase12MultiTimeframeReport({
+    datasets,
+    visibleRanges,
+    quality,
+    dailyBoundaryMode: env.DAILY_BOUNDARY_MODE,
+    legacyM1Plans: phase12TradeHistory.items,
+  });
+
   const reportSummary = createAnalysisReportSummary({
     meta,
     quality,
@@ -412,6 +518,13 @@ export async function analyzeHistoricalMarket(
     tradeManagementSummary: tradeManagementResult.summary,
     latestTradePlan: tradeManagementResult.latest,
   });
+  reportSummary.comparisonMetrics.nativeM1Signals = phase12.timeframeSummaries.M1.generated;
+  reportSummary.comparisonMetrics.nativeM5Signals = phase12.timeframeSummaries.M5.generated;
+  reportSummary.comparisonMetrics.nativeM15Signals = phase12.timeframeSummaries.M15.generated;
+  reportSummary.comparisonMetrics.phase12PaperSignals = phase12.totalTradeReady;
+  reportSummary.keyFindings.push(
+    `Phase 12 generated ${phase12.timeframeSummaries.M1.generated} M1-origin, ${phase12.timeframeSummaries.M5.generated} native M5 and ${phase12.timeframeSummaries.M15.generated} native M15 signals.`,
+  );
 
   const cached = analysisCache.create(
     {
@@ -432,6 +545,7 @@ export async function analyzeHistoricalMarket(
       tradeManagementSummary: tradeManagementResult.summary,
       latestTradePlan: tradeManagementResult.latest,
       reportSummary,
+      phase12,
       rolling5hLatest,
     },
     {
@@ -481,6 +595,7 @@ export async function analyzeHistoricalMarket(
     latestTradePlan: tradeManagementResult.latest,
     reportSummary,
     completeReport,
+    phase12,
     rolling5hLatest,
     initialWindow: createMarketWindow(
       cached,

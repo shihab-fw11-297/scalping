@@ -1,7 +1,11 @@
 import { DAY_MS, MINUTE_MS } from "./constants";
 
 export type WeekendSchedule =
-  | { mode: "NEW_YORK_17" }
+  | {
+      mode: "NEW_YORK_17";
+      /** XAUUSD is closed for its daily 17:00-18:00 New York maintenance. */
+      dailyMaintenance?: "NEW_YORK_17_TO_18";
+    }
   | {
       mode: "FIXED_UTC";
       fridayCloseUtcHour: number;
@@ -136,11 +140,38 @@ export function isExpectedForexClosure(
   const parts = getNewYorkParts(timestampMs);
   const minutesSinceMidnight = parts.hour * 60 + parts.minute;
   const closeMinute = 17 * 60;
+  const maintenanceEndMinute = 18 * 60;
 
   if (parts.weekday === 6) return true;
   if (parts.weekday === 5 && minutesSinceMidnight >= closeMinute) return true;
   if (parts.weekday === 0 && minutesSinceMidnight < closeMinute) return true;
+  if (
+    schedule.dailyMaintenance === "NEW_YORK_17_TO_18" &&
+    parts.weekday !== 5 &&
+    minutesSinceMidnight >= closeMinute &&
+    minutesSinceMidnight < maintenanceEndMinute
+  ) {
+    return true;
+  }
   return false;
+}
+
+export function countExpectedMarketMinutes(
+  fromTimestampMs: number,
+  toTimestampMs: number,
+  schedule: WeekendSchedule,
+): { tradable: number; closed: number } {
+  let tradable = 0;
+  let closed = 0;
+  for (
+    let timestamp = ceilToMinute(fromTimestampMs);
+    timestamp < toTimestampMs;
+    timestamp += MINUTE_MS
+  ) {
+    if (isExpectedForexClosure(timestamp, schedule)) closed += 1;
+    else tradable += 1;
+  }
+  return { tradable, closed };
 }
 
 export function getDailyBucketStart(

@@ -1,6 +1,7 @@
 export type SourceTimeframe = "M1";
 export type DerivedTimeframe = "M5" | "M15" | "H1" | "D1";
 export type Timeframe = SourceTimeframe | DerivedTimeframe;
+export type SignalOriginTimeframe = "M1" | "M5" | "M15";
 
 /** [timestampMs, open, high, low, close, volume] */
 export type CompactCandle = readonly [
@@ -340,6 +341,16 @@ export interface TimeframeMeta {
   incompleteCandles: number;
 }
 
+export interface SignalWindowNavigation {
+  totalSignalsInPeriod: number;
+  signalsInWindow: number;
+  firstSignalOffset: number | null;
+  previousSignalOffset: number | null;
+  nextSignalOffset: number | null;
+  lastSignalOffset: number | null;
+  originCounts: Record<SignalOriginTimeframe, number>;
+}
+
 export interface MarketWindowResponse {
   analysisId: string;
   recoveredFromSource: boolean;
@@ -353,8 +364,9 @@ export interface MarketWindowResponse {
   priceBehaviours: PriceBehaviourView[];
   /** Deduplicated A/B trade-ready markers shown by default. */
   signalMarkers: ChartSignalMarker[];
-  /** Phase 6 pattern events retained for optional research inspection. */
+  /** Phase 6 and Phase 12 research/blocked events retained for optional inspection. */
   researchSignalMarkers: ChartSignalMarker[];
+  signalNavigation: SignalWindowNavigation;
   marketStateAtWindowEnd: MultiTimeframeStateSnapshot | null;
   hypothesisOpportunityAtWindowEnd: HypothesisOpportunitySnapshot | null;
   signalDecisionAtWindowEnd: SignalDecisionSnapshot | null;
@@ -374,6 +386,8 @@ export interface AnalyzeMarketMeta {
   intervalSemantics: "[from,to)";
   sourceTimeframe: "M1";
   fetchChunks: number;
+  plannedFetchChunks: number;
+  adaptiveSplitCount: number;
   processingMs: number;
   cacheExpiresAtUtc: string;
   weekendScheduleMode: "NEW_YORK_17" | "FIXED_UTC";
@@ -412,6 +426,7 @@ export interface AnalyzeMarketResponse {
   latestTradePlan: TradePlanSnapshot | null;
   reportSummary: AnalysisReportSummary;
   completeReport: AnalysisReport;
+  phase12: Phase12MultiTimeframeReport;
   rolling5hLatest: RollingWindowSnapshot | null;
   initialWindow: MarketWindowResponse;
 }
@@ -437,6 +452,7 @@ export interface CachedAnalysis {
   tradeManagementSummary: TradeManagementSummary;
   latestTradePlan: TradePlanSnapshot | null;
   reportSummary: AnalysisReportSummary;
+  phase12: Phase12MultiTimeframeReport;
   rolling5hLatest: RollingWindowSnapshot | null;
 }
 
@@ -807,6 +823,30 @@ export interface SessionLiquiditySnapshot {
   dataReady: boolean;
 }
 
+export interface SessionLiquidityCoverageBreakdown {
+  complete: number;
+  expectedMarketClosure: number;
+  boundaryAndClosure: number;
+  partialUsable: number;
+  partialRejected: number;
+  missingData: number;
+  overfull: number;
+}
+
+export interface SessionLiquidityReadinessDiagnostics {
+  d1TotalClosed: number;
+  d1UsableClosed: number;
+  h1TotalClosed: number;
+  h1UsableClosed: number;
+  minimumRequiredD1: number;
+  minimumRequiredH1: number;
+  d1RejectedByCoverage: number;
+  h1RejectedByCoverage: number;
+  d1Coverage: SessionLiquidityCoverageBreakdown;
+  h1Coverage: SessionLiquidityCoverageBreakdown;
+  lastFailureReasons: string[];
+}
+
 export interface SessionLiquiditySummary {
   sampleCount: number;
   dataReadySamples: number;
@@ -824,6 +864,7 @@ export interface SessionLiquiditySummary {
   sessionCounts: Record<import("./trading-session").XauTradingSession, number>;
   locationCounts: Record<MarketLocationZone, number>;
   strongestQmlSetups: QmlSetupSnapshot[];
+  readiness: SessionLiquidityReadinessDiagnostics;
 }
 
 export type HypothesisDirection = "BULLISH" | "BEARISH" | "RANGE";
@@ -1313,6 +1354,10 @@ export interface PositionSizingLimitation {
 
 export interface TradePlanSnapshot {
   timestampMs: number;
+  originTimeframe: "M1";
+  executionTimeframe: "M1";
+  confirmationTimeframe: "M5";
+  biasTimeframe: "M15";
   planId: string | null;
   family: OpportunityFamily | null;
   direction: OpportunityDirection;
@@ -1346,6 +1391,10 @@ export interface TradePlanSnapshot {
 
 export interface TradePlanEvent {
   timestampMs: number;
+  originTimeframe: "M1";
+  executionTimeframe: "M1";
+  confirmationTimeframe: "M5";
+  biasTimeframe: "M15";
   planId: string;
   family: OpportunityFamily;
   direction: Exclude<OpportunityDirection, "NEUTRAL">;
@@ -1417,6 +1466,67 @@ export interface TradePlanHistoryResponse {
   items: TradePlanHistoryItem[];
 }
 
+export type Phase12SignalPermission = "TRADE_READY" | "PAPER_TRADE" | "RESEARCH_ONLY" | "BLOCKED";
+export type Phase12SignalSource = "LEGACY_M1_ENGINE" | "NATIVE_TIMEFRAME_ENGINE";
+export type Phase12Outcome = "WIN" | "LOSS" | "OPEN" | "AMBIGUOUS" | "NO_ENTRY";
+
+export interface Phase12NativeSignal {
+  signalId: string;
+  timestampMs: number;
+  originTimeframe: SignalOriginTimeframe;
+  executionTimeframe: SignalOriginTimeframe;
+  confirmationTimeframe: "M5" | "M15" | "H1";
+  confirmationDirection: PriceDirection;
+  confirmationPassed: boolean;
+  biasTimeframe: "M15" | "H1" | "D1";
+  biasDirection: PriceDirection;
+  biasPassed: boolean;
+  source: Phase12SignalSource;
+  family: OpportunityFamily;
+  direction: Exclude<OpportunityDirection, "NEUTRAL">;
+  action: Exclude<SignalAction, "NONE">;
+  score: number;
+  grade: TradeQualityGrade;
+  permission: Phase12SignalPermission;
+  entryPrice: number;
+  stopLossPrice: number;
+  tp1Price: number;
+  riskReward: number;
+  dataIntegrityGrade: DataIntegrityGrade;
+  reasons: string[];
+  warnings: string[];
+  outcome: Phase12Outcome;
+  realizedR: number | null;
+}
+
+export interface Phase12TimeframeSignalSummary {
+  originTimeframe: SignalOriginTimeframe;
+  generated: number;
+  tradeReady: number;
+  paperTrade: number;
+  researchOnly: number;
+  blocked: number;
+  gradeA: number;
+  gradeB: number;
+  wins: number;
+  losses: number;
+  open: number;
+  expectancyR: number | null;
+  familyCounts: Record<OpportunityFamily, number>;
+}
+
+export interface Phase12MultiTimeframeReport {
+  architecture: "NATIVE_M1_M5_M15_WITH_HTF_CONTEXT";
+  signals: Phase12NativeSignal[];
+  timeframeSummaries: Record<SignalOriginTimeframe, Phase12TimeframeSignalSummary>;
+  totalSignals: number;
+  totalTradeReady: number;
+  qmlReadinessFixed: boolean;
+  qmlReadinessDiagnostics: SessionLiquidityReadinessDiagnostics;
+  diagnostics: string[];
+  semantics: "NATIVE_TIMEFRAME_SIGNALS_NOT_PROFITABILITY_PROOF";
+}
+
 export interface ChartSignalMarker {
   timestampMs: number;
   eventTimestampMs: number;
@@ -1430,6 +1540,10 @@ export interface ChartSignalMarker {
   markerKind?: "TRADE_READY" | "RESEARCH";
   grade?: TradeQualityGrade;
   planStatus?: TradePlanStatus;
+  originTimeframe?: SignalOriginTimeframe;
+  executionTimeframe?: SignalOriginTimeframe;
+  signalSource?: Phase12SignalSource;
+  permission?: Phase12SignalPermission;
 }
 
 export interface AnalysisReportTopCount {
@@ -1539,6 +1653,222 @@ export interface AnalysisReportFamilyBreakdown {
   tradeReady: number;
 }
 
+
+export type DataIntegrityGrade = "A_DATA" | "B_DATA" | "C_DATA" | "INVALID_DATA";
+export type AmbiguityPolicy = "UNRESOLVED" | "CONSERVATIVE" | "CLOSE_CONFIRMATION";
+
+export interface TradeDataIntegrity {
+  grade: DataIntegrityGrade;
+  overallMissingRatePercent: number;
+  previousGapDistanceBars: number | null;
+  nextGapDistanceBars: number | null;
+  nearestGapDistanceBars: number | null;
+  safeForPerformance: boolean;
+  maximumAllowedSignalGrade: "A" | "B" | "RESEARCH_ONLY" | "BLOCKED";
+  reasons: string[];
+}
+
+export interface AnalyticalTradeOutcome {
+  outcome: "WIN" | "LOSS" | "BREAK_EVEN" | "OPEN" | "NO_ENTRY" | "AMBIGUOUS" | "UNRESOLVED";
+  exitReason: "TP1" | "TP2" | "TP3" | "STOP_LOSS" | "BREAK_EVEN" | "EXPIRED" | "NO_ENTRY" | "AMBIGUOUS" | "OPEN";
+  exitPrice: number | null;
+  exitTimestampMs: number | null;
+  realizedR: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+  holdingMinutes: number | null;
+  barsToTp1: number | null;
+  barsToStop: number | null;
+  semantics: "ANALYTICAL_OHLC_OUTCOME_NOT_BROKER_PNL";
+}
+
+export interface ShadowPlanOutcome {
+  evaluated: boolean;
+  entryFilled: boolean;
+  outcome: "TP1" | "STOP" | "NO_FILL" | "AMBIGUOUS" | "OPEN";
+  barsToEntry: number | null;
+  barsToOutcome: number | null;
+  maximumFavourableExcursionR: number;
+  maximumAdverseExcursionR: number;
+  rejectionWouldHaveAvoidedLoss: boolean;
+  rejectionWouldHaveMissedWinner: boolean;
+  semantics: "SHADOW_REPLAY_FOR_RULE_CALIBRATION_ONLY";
+}
+
+export interface TraderReasoning {
+  thesis: string;
+  whyTradeExists: string[];
+  whyNotHigherGrade: string[];
+  invalidationNarrative: string;
+  targetNarrative: string;
+  dataWarning: string | null;
+}
+
+export interface Phase10TradePlanAnalytics {
+  planId: string;
+  dataIntegrity: TradeDataIntegrity;
+  outcome: AnalyticalTradeOutcome;
+  shadowOutcome: ShadowPlanOutcome | null;
+  traderReasoning: TraderReasoning;
+}
+
+export interface ScoreCalibrationBucket {
+  bucket: string;
+  plans: number;
+  entries: number;
+  resolved: number;
+  wins: number;
+  losses: number;
+  breakEven: number;
+  ambiguous: number;
+  winRatePercent: number | null;
+  averageRealizedR: number | null;
+  averageMfeR: number | null;
+  averageMaeR: number | null;
+}
+
+export interface RejectionRuleCalibration {
+  code: TradePlanRejectionCode;
+  rejectedPlans: number;
+  shadowEntries: number;
+  lossesAvoided: number;
+  winnersMissed: number;
+  noFill: number;
+  ambiguous: number;
+}
+
+export interface Phase10CalibrationReport {
+  qmlDataReady: boolean;
+  dataIntegrityGrade: DataIntegrityGrade;
+  officialPerformanceValid: boolean;
+  ambiguityPolicies: Record<AmbiguityPolicy, { resolved: number; wins: number; losses: number; winRatePercent: number | null }>;
+  aggregateRealizedR: number;
+  profitFactorR: number | null;
+  scoreBuckets: ScoreCalibrationBucket[];
+  rejectionRules: RejectionRuleCalibration[];
+  tradeAnalytics: Phase10TradePlanAnalytics[];
+  diagnostics: string[];
+  semantics: "PHASE10_CALIBRATION_NOT_PROFITABILITY_GUARANTEE";
+}
+
+
+export type Phase11AuditGrade = "A" | "B" | "C" | "BLOCKED";
+export type Phase11DeploymentPermission = "LIVE_CANDIDATE" | "PAPER_TRADE" | "RESEARCH_ONLY" | "BLOCKED";
+export type Phase11SystemVerdict = "LIVE_CANDIDATE" | "PAPER_READY" | "DEVELOPING" | "NOT_READY";
+
+export type ScalpingAuditHardVetoCode =
+  | "PLAN_REJECTED"
+  | "SOURCE_DATA_INVALID"
+  | "DATA_GAP_NEAR_SIGNAL"
+  | "PARTIAL_SOURCE_DATA"
+  | "NOISE_REGIME"
+  | "RANGE_MIDDLE_REVERSAL"
+  | "QML_CONTEXT_NOT_READY"
+  | "QML_RETEST_NOT_CONFIRMED"
+  | "THIRD_OR_LATER_RETEST"
+  | "TIMEFRAME_ROTATION_CONTEXT_ONLY"
+  | "ENTRY_ALREADY_LATE"
+  | "INVALID_STRUCTURAL_STOP"
+  | "RR_BELOW_MINIMUM";
+
+export interface Phase11AuditComponent {
+  category:
+    | "DATA_INTEGRITY"
+    | "HTF_CONTEXT"
+    | "SESSION_QUALITY"
+    | "LIQUIDITY_LOCATION"
+    | "SETUP_STRUCTURE"
+    | "ENTRY_QUALITY"
+    | "RISK_STRUCTURE"
+    | "TARGET_QUALITY"
+    | "STATISTICAL_EVIDENCE";
+  score: number;
+  maxScore: number;
+  checks: string[];
+  warnings: string[];
+}
+
+export interface Phase11SignalAudit {
+  planId: string;
+  family: OpportunityFamily;
+  direction: Exclude<OpportunityDirection, "NEUTRAL">;
+  signalTimestampMs: number;
+  technicalScore: number;
+  evidenceScore: number;
+  totalScore: number;
+  grade: Phase11AuditGrade;
+  deploymentPermission: Phase11DeploymentPermission;
+  suggestedRiskPercent: number;
+  hardVetoes: ScalpingAuditHardVetoCode[];
+  softWarnings: string[];
+  components: Phase11AuditComponent[];
+  context: {
+    session: import("./trading-session").XauTradingSession;
+    regime: CompositeMarketState;
+    alignment: TimeframeAlignment;
+    marketLocation: MarketLocationZone;
+    qmlStage: QmlSetupStage;
+    retestCount: number;
+  };
+  semantics: "PROFESSIONAL_SCALPING_AUDIT_NOT_PROFITABILITY_GUARANTEE";
+}
+
+export interface Phase11PerformanceSlice {
+  key: string;
+  plans: number;
+  entered: number;
+  resolved: number;
+  wins: number;
+  losses: number;
+  breakEven: number;
+  ambiguous: number;
+  aggregateR: number;
+  expectancyR: number | null;
+  winRatePercent: number | null;
+  profitFactorR: number | null;
+  averageWinnerR: number | null;
+  averageLoserR: number | null;
+  maximumDrawdownR: number;
+  maximumLosingStreak: number;
+}
+
+export interface Phase11ForwardValidation {
+  method: "CHRONOLOGICAL_70_30_HOLDOUT";
+  calibration: Phase11PerformanceSlice;
+  forward: Phase11PerformanceSlice;
+  sampleSufficient: boolean;
+  positive: boolean;
+}
+
+export interface Phase11SystemGate {
+  code: string;
+  passed: boolean;
+  current: number | string | boolean | null;
+  required: string;
+  requiredForLive: boolean;
+}
+
+export interface Phase11ScalpingAuditReport {
+  systemScore: number;
+  systemVerdict: Phase11SystemVerdict;
+  liveReady: boolean;
+  technicalMaximumScore: 90;
+  totalMaximumScore: 100;
+  auditCounts: Record<Phase11AuditGrade, number>;
+  permissionCounts: Record<Phase11DeploymentPermission, number>;
+  overallPerformance: Phase11PerformanceSlice;
+  familyPerformance: Phase11PerformanceSlice[];
+  sessionPerformance: Phase11PerformanceSlice[];
+  regimePerformance: Phase11PerformanceSlice[];
+  gradePerformance: Phase11PerformanceSlice[];
+  forwardValidation: Phase11ForwardValidation;
+  gates: Phase11SystemGate[];
+  hardVetoCounts: Record<string, number>;
+  planAudits: Phase11SignalAudit[];
+  diagnostics: string[];
+  semantics: "PHASE11_SCALPING_AUDIT_REQUIRES_FORWARD_VALIDATION_BEFORE_LIVE_USE";
+}
+
 export interface AnalysisReport {
   analysisId: string;
   summary: AnalysisReportSummary;
@@ -1557,6 +1887,9 @@ export interface AnalysisReport {
   tradePlans: TradePlanHistoryItem[];
   dataIssueSamples: DataIssue[];
   gapSamples: GapRecord[];
+  phase10: Phase10CalibrationReport;
+  phase11: Phase11ScalpingAuditReport;
+  phase12: Phase12MultiTimeframeReport;
   semantics: "COMPLETE_HISTORICAL_ANALYSIS_REPORT_FOR_COMPARISON_AND_REVIEW";
 }
 

@@ -14,6 +14,10 @@ const PROBLEM_STATUSES: CandleCoverageStatus[] = [
 
 export function QualityPanel({ result }: QualityPanelProps) {
   const { meta, quality, rolling5hLatest } = result;
+  const expectedTradableM1 = quality.valid + quality.missingTradableCandles;
+  const coveragePercent = expectedTradableM1 === 0
+    ? 100
+    : (quality.valid / expectedTradableM1) * 100;
 
   return (
     <section className="panel">
@@ -28,6 +32,7 @@ export function QualityPanel({ result }: QualityPanelProps) {
       <div className="metric-grid">
         <Metric label="Finage records" value={quality.received.toLocaleString()} />
         <Metric label="Valid M1" value={quality.valid.toLocaleString()} />
+        <Metric label="M1 coverage" value={`${coveragePercent.toFixed(2)}%`} />
         <Metric label="Warm-up M1" value={quality.warmupCandles.toLocaleString()} />
         <Metric label="Context M1 total" value={quality.contextValid.toLocaleString()} />
         <Metric label="Invalid" value={quality.invalid.toLocaleString()} />

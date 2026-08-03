@@ -804,6 +804,10 @@ function evaluateTradeQuality(input: {
     score = Math.min(score, 64);
     negativeReasons.push("ROTATION_IS_CONTEXT_ONLY");
   }
+  if (!input.liquidity?.dataReady) {
+    score = Math.min(score, TRADE_MANAGEMENT_CONFIG.gradeAMinimumScore - 1);
+    negativeReasons.push("SESSION_LIQUIDITY_CONTEXT_NOT_READY");
+  }
   if (input.structuralRisk.riskInAverageRanges > 2.5) {
     score = Math.max(0, score - 5);
     negativeReasons.push("WIDE_STRUCTURAL_RISK");
@@ -1367,6 +1371,10 @@ function snapshotForPlan(
               : "NO_ACTION";
   return {
     timestampMs,
+    originTimeframe: "M1",
+    executionTimeframe: "M1",
+    confirmationTimeframe: "M5",
+    biasTimeframe: "M15",
     planId: plan.planId,
     family: plan.family,
     direction: plan.direction,
@@ -1427,6 +1435,10 @@ function eventFromPlan(plan: PlanRecord, status = plan.initialStatus): TradePlan
   const tp2 = plan.targetSpace.targets.find((target) => target.name === "TP2");
   return {
     timestampMs: plan.signalTimestampMs,
+    originTimeframe: "M1",
+    executionTimeframe: "M1",
+    confirmationTimeframe: "M5",
+    biasTimeframe: "M15",
     planId: plan.planId,
     family: plan.family,
     direction: plan.direction,
@@ -1943,6 +1955,10 @@ export function simulateTradePlanCreation(input: TradePlanCreationInput): TradeP
   const status = plan.initialStatus;
   return {
     timestampMs: plan.signalTimestampMs,
+    originTimeframe: "M1",
+    executionTimeframe: "M1",
+    confirmationTimeframe: "M5",
+    biasTimeframe: "M15",
     planId: plan.planId,
     family: plan.family,
     direction: plan.direction,

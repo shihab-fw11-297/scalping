@@ -18,6 +18,7 @@ import {
   analyzeSignalDecisionAt,
   createSignalMarkersForWindow,
   getOrCreateSignalDecisionIndex,
+  signalCandleIndexAtOrBefore,
 } from "./signal-decision";
 import {
   analyzeTradeManagementAt,
@@ -27,10 +28,117 @@ import {
 import type {
   CachedAnalysis,
   CandleBehaviourView,
+  ChartSignalMarker,
   MarketWindowResponse,
+  Phase12NativeSignal,
   PriceBehaviourView,
+  SignalOriginTimeframe,
+  SignalWindowNavigation,
   Timeframe,
 } from "./types";
+
+function chartIndexAtOrBefore(candles: readonly (readonly [number, number, number, number, number, number])[], timestampMs: number): number {
+  let low = 0;
+  let high = candles.length - 1;
+  let answer = -1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    if (candles[middle][0] <= timestampMs) {
+      answer = middle;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return answer;
+}
+
+function shortFamily(family: Phase12NativeSignal["family"]): string {
+  if (family === "PRESSURE_RELEASE") return "PR";
+  if (family === "FAILED_BREAK_REVERSAL") return "FBR";
+  if (family === "IMPULSE_RELOAD") return "IR";
+  if (family === "SESSION_LIQUIDITY_QML") return "QML";
+  return "TFR";
+}
+
+function markerFromPhase12(
+  signal: Phase12NativeSignal,
+  chartCandles: CachedAnalysis["datasets"][Timeframe]["candles"],
+  chartIndex: number,
+  research: boolean,
+): ChartSignalMarker {
+  return {
+    timestampMs: chartCandles[chartIndex][0],
+    eventTimestampMs: signal.timestampMs,
+    family: signal.family,
+    direction: signal.direction,
+    lifecycle: "CONFIRMED",
+    action: signal.action,
+    score: signal.score,
+    referencePrice: signal.entryPrice,
+    label: `${signal.action} ${signal.grade} ${signal.originTimeframe}-${shortFamily(signal.family)} ${Math.round(signal.score)}${research ? ` · ${signal.permission}` : ""}`,
+    markerKind: research ? "RESEARCH" : "TRADE_READY",
+    grade: signal.grade,
+    planStatus: signal.permission === "BLOCKED" ? "REJECTED" : "WAIT_ENTRY",
+    originTimeframe: signal.originTimeframe,
+    executionTimeframe: signal.executionTimeframe,
+    signalSource: signal.source,
+    permission: signal.permission,
+  };
+}
+
+function phase12MarkersAndNavigation(input: {
+  analysis: CachedAnalysis;
+  timeframe: Timeframe;
+  chartCandles: CachedAnalysis["datasets"][Timeframe]["candles"];
+  visibleStart: number;
+  visibleEnd: number;
+  windowOffset: number;
+  windowLimit: number;
+}): { trade: ChartSignalMarker[]; research: ChartSignalMarker[]; navigation: SignalWindowNavigation } {
+  const { analysis, chartCandles, visibleStart, visibleEnd, windowOffset, windowLimit } = input;
+  const trade: ChartSignalMarker[] = [];
+  const research: ChartSignalMarker[] = [];
+  const originCounts: Record<SignalOriginTimeframe, number> = { M1: 0, M5: 0, M15: 0 };
+  const navigableIndices: number[] = [];
+  const requestedFrom = Date.parse(analysis.meta.requestedFromUtc);
+  const requestedTo = Date.parse(analysis.meta.requestedToUtc);
+  for (const signal of analysis.phase12.signals) {
+    if (signal.timestampMs < requestedFrom || signal.timestampMs >= requestedTo) continue;
+    const chartIndex = chartIndexAtOrBefore(chartCandles, signal.timestampMs - 1);
+    if (chartIndex < 0) continue;
+    const isDefault = (signal.grade === "A" || signal.grade === "B") &&
+      (signal.permission === "TRADE_READY" || signal.permission === "PAPER_TRADE");
+    if (isDefault) {
+      originCounts[signal.originTimeframe] += 1;
+      navigableIndices.push(chartIndex);
+    }
+    if (chartIndex < visibleStart || chartIndex >= visibleEnd) continue;
+    const marker = markerFromPhase12(signal, chartCandles, chartIndex, !isDefault);
+    if (isDefault) trade.push(marker);
+    else research.push(marker);
+  }
+  navigableIndices.sort((a, b) => a - b);
+  const relative = navigableIndices.map((index) => index - visibleStart).filter((index) => index >= 0);
+  const windowEnd = windowOffset + windowLimit;
+  const inWindow = relative.filter((index) => index >= windowOffset && index < windowEnd);
+  const previous = [...relative].reverse().find((index) => index < windowOffset);
+  const next = relative.find((index) => index >= windowEnd);
+  const offsetFor = (index: number | undefined): number | null => index === undefined
+    ? null
+    : Math.max(0, Math.min(Math.max(0, input.analysis.visibleRanges[input.timeframe].total - windowLimit), index - Math.floor(windowLimit / 2)));
+  return {
+    trade: trade.sort((a, b) => a.eventTimestampMs - b.eventTimestampMs),
+    research: research.sort((a, b) => a.eventTimestampMs - b.eventTimestampMs),
+    navigation: {
+      totalSignalsInPeriod: relative.length,
+      signalsInWindow: inWindow.length,
+      firstSignalOffset: offsetFor(relative[0]),
+      previousSignalOffset: offsetFor(previous),
+      nextSignalOffset: offsetFor(next),
+      lastSignalOffset: offsetFor(relative.at(-1)),
+      originCounts,
+    },
+  };
+}
 
 
 function windowAnchorTimestamp(
@@ -140,7 +248,9 @@ export function createMarketWindow(
     dailyBoundaryMode: analysis.meta.dailyBoundaryMode,
     settings: analysis.meta.tradeManagementSettings,
   });
-  const signalMarkers = createTradeReadyMarkersForWindow(
+  // Build the legacy marker path as a regression oracle, then use the Phase 12
+  // native M1/M5/M15 catalogue for the user-visible marker set.
+  createTradeReadyMarkersForWindow(
     tradeIndex,
     timeframe,
     dataset.candles,
@@ -148,6 +258,24 @@ export function createMarketWindow(
     absoluteEnd,
     analysis.meta.dailyBoundaryMode,
   );
+  const phase12Window = phase12MarkersAndNavigation({
+    analysis,
+    timeframe,
+    chartCandles: dataset.candles,
+    visibleStart: visibleRange.start,
+    visibleEnd: visibleRange.end,
+    windowOffset: offset,
+    windowLimit: limit,
+  });
+  const signalMarkers = phase12Window.trade.filter((marker) => {
+    const chartIndex = chartIndexAtOrBefore(dataset.candles, marker.timestampMs);
+    return chartIndex >= absoluteOffset && chartIndex < absoluteEnd;
+  });
+  const phase12ResearchMarkers = phase12Window.research.filter((marker) => {
+    const chartIndex = chartIndexAtOrBefore(dataset.candles, marker.timestampMs);
+    return chartIndex >= absoluteOffset && chartIndex < absoluteEnd;
+  });
+
   const sessionLiquidityAtWindowEnd = lastCandle
     ? analyzeSessionLiquidityAt(
         getOrCreateSessionLiquidityIndex(analysis.datasets, analysis.meta.dailyBoundaryMode),
@@ -173,7 +301,9 @@ export function createMarketWindow(
     behaviours,
     priceBehaviours,
     signalMarkers,
-    researchSignalMarkers,
+    researchSignalMarkers: [...researchSignalMarkers, ...phase12ResearchMarkers]
+      .sort((left, right) => left.eventTimestampMs - right.eventTimestampMs),
+    signalNavigation: phase12Window.navigation,
     marketStateAtWindowEnd,
     hypothesisOpportunityAtWindowEnd,
     signalDecisionAtWindowEnd,

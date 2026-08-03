@@ -15,7 +15,7 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { ChartSignalMarker, CompactCandle, SessionLiquiditySnapshot, TradePlanSnapshot } from "@/lib/market/types";
+import type { ChartSignalMarker, CompactCandle, SessionLiquiditySnapshot, SignalOriginTimeframe, TradePlanSnapshot } from "@/lib/market/types";
 
 interface MarketChartProps {
   candles: readonly CompactCandle[];
@@ -29,6 +29,7 @@ interface MarketChartProps {
   showInvalidations?: boolean;
   showTradeLevels?: boolean;
   showLiquidityLevels?: boolean;
+  showOriginTimeframes?: Record<SignalOriginTimeframe, boolean>;
 }
 
 function toChartData(candles: readonly CompactCandle[]): CandlestickData[] {
@@ -77,16 +78,19 @@ function toSeriesMarkers(
     showGradeB: boolean;
     showResearchSignals: boolean;
     showInvalidations: boolean;
+    showOriginTimeframes: Record<SignalOriginTimeframe, boolean>;
   },
 ): SeriesMarker<UTCTimestamp>[] {
   const visible: SeriesMarker<UTCTimestamp>[] = [];
   for (const marker of tradeMarkers) {
+    if (marker.originTimeframe && !options.showOriginTimeframes[marker.originTimeframe]) continue;
     if (marker.grade === "A" && !options.showGradeA) continue;
     if (marker.grade === "B" && !options.showGradeB) continue;
     visible.push(markerToSeries(marker, false));
   }
   if (options.showResearchSignals) {
     for (const marker of researchMarkers) {
+      if (marker.originTimeframe && !options.showOriginTimeframes[marker.originTimeframe]) continue;
       if (marker.lifecycle === "INVALIDATED" && !options.showInvalidations) continue;
       visible.push(markerToSeries(marker, true));
     }
@@ -106,6 +110,7 @@ export function MarketChart({
   showInvalidations = false,
   showTradeLevels = true,
   showLiquidityLevels = true,
+  showOriginTimeframes = { M1: true, M5: true, M15: true },
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -177,9 +182,10 @@ export function MarketChart({
         showGradeB,
         showResearchSignals,
         showInvalidations,
+        showOriginTimeframes,
       }),
     );
-  }, [signalMarkers, researchSignalMarkers, showGradeA, showGradeB, showResearchSignals, showInvalidations]);
+  }, [signalMarkers, researchSignalMarkers, showGradeA, showGradeB, showResearchSignals, showInvalidations, showOriginTimeframes]);
 
   useEffect(() => {
     const series = seriesRef.current;

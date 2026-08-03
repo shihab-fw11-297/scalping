@@ -93,6 +93,10 @@ export interface DedupeResult {
   conflictIssues: DataIssue[];
 }
 
+export interface MergeCandleChunksResult extends DedupeResult {
+  outOfOrderDetected: boolean;
+}
+
 function sameCandle(a: CompactCandle, b: CompactCandle): boolean {
   return (
     a[1] === b[1] &&
@@ -142,4 +146,37 @@ export function dedupeSortedCandles(
   }
 
   return { candles: result, duplicates, duplicateConflicts, conflictIssues };
+}
+
+/**
+ * Combines independently sorted provider chunks into one chronological,
+ * timestamp-unique stream. The fast path stays O(n); a global sort is used
+ * only when a chunk boundary arrives out of order.
+ */
+export function mergeAndDedupeCandleChunks(
+  chunks: readonly (readonly CompactCandle[])[],
+): MergeCandleChunksResult {
+  const combined: CompactCandle[] = [];
+  let outOfOrderDetected = false;
+
+  for (const chunk of chunks) {
+    for (const candle of chunk) {
+      if (
+        combined.length > 0 &&
+        candle[0] < combined[combined.length - 1][0]
+      ) {
+        outOfOrderDetected = true;
+      }
+      combined.push(candle);
+    }
+  }
+
+  if (outOfOrderDetected) {
+    combined.sort((left, right) => left[0] - right[0]);
+  }
+
+  return {
+    ...dedupeSortedCandles(combined),
+    outOfOrderDetected,
+  };
 }

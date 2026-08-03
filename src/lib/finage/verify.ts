@@ -5,6 +5,7 @@ import {
 } from "./client";
 import { getServerEnv } from "@/lib/market/env";
 import { normalizeFinageAggregates } from "@/lib/market/normalize";
+import { STATIC_RUNTIME_LIMITS } from "@/lib/market/static-limits";
 
 export interface FinageVerificationOptions {
   fromDate?: string;
@@ -50,6 +51,11 @@ async function verifyRange(
   const fromMs = parseDatePath(fromDate, "fromDate");
   const toDayMs = parseDatePath(toDate, "toDate");
   if (toDayMs < fromMs) throw new Error("toDate must be on or after fromDate.");
+  if (toDayMs !== fromMs) {
+    throw new Error(
+      "Finage verification accepts one target date at a time; set --from and --to to the same date.",
+    );
+  }
 
   // Finage's date path is calendar-date based. Include the complete `toDate`
   // only for verification normalization.
@@ -59,7 +65,9 @@ async function verifyRange(
     apiKey: env.FINAGE_API_KEY,
     symbol: env.FINAGE_XAUUSD_SYMBOL,
     fromDate,
-    toDate,
+    // Use Finage's reliable day-plus-following-day form, then normalize back
+    // to the single target date below.
+    toDate: datePath(toDayMs + 86_400_000),
     limit,
     timeoutMs: env.FINAGE_REQUEST_TIMEOUT_MS,
     sort: env.FINAGE_SORT === "provider_default" ? undefined : env.FINAGE_SORT,
@@ -116,7 +124,10 @@ export async function verifyFinageConnection(
   const env = getServerEnv();
   const limit = Math.max(
     1,
-    Math.min(50_000, Math.floor(options.limit ?? 2_000)),
+    Math.min(
+      STATIC_RUNTIME_LIMITS.FINAGE_MAX_RESULTS_PER_REQUEST,
+      Math.floor(options.limit ?? 2_000),
+    ),
   );
 
   if (options.fromDate || options.toDate) {

@@ -12,7 +12,6 @@ const envSchema = z.object({
   FINAGE_REST_BASE_URL: z.url().default("https://api.finage.co.uk"),
   FINAGE_XAUUSD_SYMBOL: z.string().min(1).default("XAUUSD"),
   FINAGE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
-  FINAGE_FETCH_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(2),
   FINAGE_SORT: z.enum(["provider_default", "asc", "desc"]).default("provider_default"),
   FINAGE_DATE_FORMAT: z.enum(["provider_default", "ts", "dt"]).default("provider_default"),
   ANALYSIS_WARMUP_CALENDAR_DAYS: z.coerce.number().int().min(0).max(45).default(30),

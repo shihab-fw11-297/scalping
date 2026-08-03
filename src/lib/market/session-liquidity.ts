@@ -453,8 +453,20 @@ function averagePriorRange(prefix: Float64Array, index: number, lookback = 20): 
   return count > 0 ? (prefix[index] - prefix[start]) / count : 0;
 }
 
+function contextUsable(dataset: TimeframeDataset, index: number): boolean {
+  if (index < 0 || index >= dataset.candles.length) return false;
+  const coverage = dataset.completeness[index];
+  if (!coverage) return false;
+  if (coverage.status === "OVERFULL" || coverage.status === "MISSING_DATA") return false;
+  if (coverage.status === "COMPLETE" || coverage.status === "EXPECTED_MARKET_CLOSURE" || coverage.status === "BOUNDARY_AND_CLOSURE") return true;
+  // Context levels do not require a perfectly complete bucket. A candle with at least
+  // 97% of its expected tradable children is usable for HTF location, but remains
+  // ineligible for execution-time confirmation elsewhere in the engine.
+  return coverage.completenessPercent >= 97;
+}
+
 function complete(dataset: TimeframeDataset, index: number): boolean {
-  return index >= 0 && dataset.completeness[index]?.status === "COMPLETE";
+  return contextUsable(dataset, index);
 }
 
 function isPivot(
@@ -1066,6 +1078,27 @@ function buildIndex(
   let d1Pointer = 0;
   let lastM15ClosedProcessed = NONE;
   let lastH1ClosedProcessed = NONE;
+  let d1TotalClosed = 0;
+  let d1UsableClosed = 0;
+  let h1TotalClosed = 0;
+  let h1UsableClosed = 0;
+  let d1RejectedByCoverage = 0;
+  let h1RejectedByCoverage = 0;
+  const emptyCoverageBreakdown = () => ({ complete: 0, expectedMarketClosure: 0, boundaryAndClosure: 0, partialUsable: 0, partialRejected: 0, missingData: 0, overfull: 0 });
+  const d1Coverage = emptyCoverageBreakdown();
+  const h1Coverage = emptyCoverageBreakdown();
+  const recordCoverage = (dataset: TimeframeDataset, index: number, target: ReturnType<typeof emptyCoverageBreakdown>) => {
+    const coverage = dataset.completeness[index];
+    if (!coverage) { target.missingData += 1; return; }
+    if (coverage.status === "COMPLETE") target.complete += 1;
+    else if (coverage.status === "EXPECTED_MARKET_CLOSURE") target.expectedMarketClosure += 1;
+    else if (coverage.status === "BOUNDARY_AND_CLOSURE") target.boundaryAndClosure += 1;
+    else if (coverage.status === "MISSING_DATA") target.missingData += 1;
+    else if (coverage.status === "OVERFULL") target.overfull += 1;
+    else if (coverage.completenessPercent >= 97) target.partialUsable += 1;
+    else target.partialRejected += 1;
+  };
+  let lastFailureReasons: string[] = ["D1_WARMUP_NOT_READY", "H1_WARMUP_NOT_READY"];
 
   const sessionCounts = countRecord(SESSION_VALUES);
   const locationCounts = countRecord(LOCATION_VALUES);
@@ -1093,7 +1126,14 @@ function buildIndex(
       const d1 = datasets.D1.candles[d1Pointer];
       const closeMs = getNextDailyBucketStart(d1[0], dailyBoundaryMode);
       if (closeMs > closeTimestampMs) break;
-      if (complete(datasets.D1, d1Pointer)) closedDays.push(d1);
+      d1TotalClosed += 1;
+      recordCoverage(datasets.D1, d1Pointer, d1Coverage);
+      if (contextUsable(datasets.D1, d1Pointer)) {
+        closedDays.push(d1);
+        d1UsableClosed += 1;
+      } else {
+        d1RejectedByCoverage += 1;
+      }
       d1Pointer += 1;
     }
     const previousDay = closedDays.at(-1) ?? null;
@@ -1113,6 +1153,10 @@ function buildIndex(
     const h1Closed = closedIndexAtOrBefore(datasets.H1, 60 * MINUTE_MS, closeTimestampMs);
     while (lastH1ClosedProcessed < h1Closed) {
       lastH1ClosedProcessed += 1;
+      h1TotalClosed += 1;
+      recordCoverage(datasets.H1, lastH1ClosedProcessed, h1Coverage);
+      if (contextUsable(datasets.H1, lastH1ClosedProcessed)) h1UsableClosed += 1;
+      else h1RejectedByCoverage += 1;
       const pivotIndex = lastH1ClosedProcessed - SESSION_LIQUIDITY_CONFIG.pivotRadius;
       if (isPivot(datasets.H1, pivotIndex, "HIGH")) h1Highs.push({ index: pivotIndex, timestampMs: datasets.H1.candles[pivotIndex][0] + 60 * MINUTE_MS, price: datasets.H1.candles[pivotIndex][2], side: "HIGH", timeframe: "H1" });
       if (isPivot(datasets.H1, pivotIndex, "LOW")) h1Lows.push({ index: pivotIndex, timestampMs: datasets.H1.candles[pivotIndex][0] + 60 * MINUTE_MS, price: datasets.H1.candles[pivotIndex][3], side: "LOW", timeframe: "H1" });
@@ -1151,7 +1195,10 @@ function buildIndex(
 
     const activeSession = classifyXauTradingSession(candle[0]);
     const location = marketLocation(candle[4], previousDayHigh, previousDayLow);
-    const dataReady = closedDays.length >= SESSION_LIQUIDITY_CONFIG.minimumWarmupD1 && h1Closed >= SESSION_LIQUIDITY_CONFIG.minimumWarmupH1;
+    const dataReady = d1UsableClosed >= SESSION_LIQUIDITY_CONFIG.minimumWarmupD1 && h1UsableClosed >= SESSION_LIQUIDITY_CONFIG.minimumWarmupH1;
+    lastFailureReasons = [];
+    if (d1UsableClosed < SESSION_LIQUIDITY_CONFIG.minimumWarmupD1) lastFailureReasons.push("D1_USABLE_WARMUP_BELOW_MINIMUM");
+    if (h1UsableClosed < SESSION_LIQUIDITY_CONFIG.minimumWarmupH1) lastFailureReasons.push("H1_USABLE_WARMUP_BELOW_MINIMUM");
     const nearest = nearestLevels(levels, candle[4]);
     const sweep = dataReady ? bestSweep(levels, candle, index, averageRange, activeSession, lastSweepByLevel) : null;
     let sweepEventIndex = NONE;
@@ -1255,6 +1302,19 @@ function buildIndex(
     sessionCounts,
     locationCounts,
     strongestQmlSetups: strongest.toDescendingArray(),
+    readiness: {
+      d1TotalClosed,
+      d1UsableClosed,
+      h1TotalClosed,
+      h1UsableClosed,
+      minimumRequiredD1: SESSION_LIQUIDITY_CONFIG.minimumWarmupD1,
+      minimumRequiredH1: SESSION_LIQUIDITY_CONFIG.minimumWarmupH1,
+      d1RejectedByCoverage,
+      h1RejectedByCoverage,
+      d1Coverage,
+      h1Coverage,
+      lastFailureReasons,
+    },
   };
   placeholder.latest = candles.length > 0 ? reconstruct(placeholder, candles.length - 1) : null;
   return placeholder;
@@ -1378,5 +1438,6 @@ export function summarizeSessionLiquidityRange(
     sessionCounts,
     locationCounts,
     strongestQmlSetups: strongest.toDescendingArray(),
+    readiness: index.summary.readiness,
   };
 }

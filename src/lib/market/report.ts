@@ -1,3 +1,6 @@
+import { createPhase10CalibrationReport } from "./phase10-calibration";
+import { createPhase11ScalpingAuditReport } from "./phase11-scalping-audit";
+import { PHASE12_CONFIG } from "./phase12-multi-timeframe";
 import { HYPOTHESIS_OPPORTUNITY_CONFIG } from "./hypothesis-opportunity";
 import { MULTI_TIMEFRAME_STATE_CONFIG } from "./multi-timeframe-state";
 import { SESSION_LIQUIDITY_CONFIG } from "./session-liquidity";
@@ -305,6 +308,9 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
     Date.parse(analysis.meta.requestedToUtc),
   );
 
+  const phase10 = createPhase10CalibrationReport(analysis, tradeHistory.items);
+  const phase11 = createPhase11ScalpingAuditReport(analysis, tradeHistory.items, phase10);
+
   return {
     analysisId: analysis.id,
     summary: analysis.reportSummary,
@@ -315,6 +321,7 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
       hypothesisOpportunity: HYPOTHESIS_OPPORTUNITY_CONFIG,
       signalDecision: SIGNAL_DECISION_CONFIG,
       tradeManagement: TRADE_MANAGEMENT_CONFIG,
+      phase12MultiTimeframe: PHASE12_CONFIG,
       analysisProfile: analysis.meta.analysisProfile,
       warmupCalendarDays: analysis.meta.warmupCalendarDays,
       userTradeSettings: analysis.meta.tradeManagementSettings,
@@ -333,6 +340,9 @@ export function createAnalysisReport(analysis: CachedAnalysis): AnalysisReport {
     familyBreakdown: createFamilyBreakdown(signalHistory.items, tradeHistory.items),
     signalEvents: signalHistory.items,
     tradePlans: tradeHistory.items,
+    phase10,
+    phase11,
+    phase12: analysis.phase12,
     dataIssueSamples: analysis.quality.issueSamples,
     gapSamples: analysis.quality.gapSamples,
     semantics: "COMPLETE_HISTORICAL_ANALYSIS_REPORT_FOR_COMPARISON_AND_REVIEW",
@@ -396,6 +406,18 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
       ["QML state", `${summary.latestContext.qmlDirection} / ${summary.latestContext.qmlStage} / ${summary.latestContext.qmlScore}`],
     ]),
     "",
+    "## Phase 12 native multi-timeframe signals",
+    "",
+    markdownTable([
+      ["M1-origin signals", report.phase12.timeframeSummaries.M1.generated],
+      ["M5-origin signals", report.phase12.timeframeSummaries.M5.generated],
+      ["M15-origin signals", report.phase12.timeframeSummaries.M15.generated],
+      ["A/B paper signals", report.phase12.totalTradeReady],
+      ["QML readiness", report.phase12.qmlReadinessFixed ? "READY" : "NOT_READY"],
+      ["D1 usable warm-up", `${report.phase12.qmlReadinessDiagnostics.d1UsableClosed}/${report.phase12.qmlReadinessDiagnostics.minimumRequiredD1}`],
+      ["H1 usable warm-up", `${report.phase12.qmlReadinessDiagnostics.h1UsableClosed}/${report.phase12.qmlReadinessDiagnostics.minimumRequiredH1}`],
+    ]),
+    "",
     "## Session, liquidity and QML",
     "",
     markdownTable([
@@ -447,6 +469,46 @@ export function createAnalysisReportMarkdown(report: AnalysisReport): string {
       ["Completion rate", `${summary.observedRates.completionRatePercent}%`],
       ["Intrabar ambiguity rate", `${summary.observedRates.intrabarAmbiguityRatePercent}%`],
     ]),
+    "",
+    "## Phase 10 calibration",
+    "",
+    markdownTable([
+      ["QML data ready", report.phase10.qmlDataReady ? "YES" : "NO"],
+      ["Data integrity grade", report.phase10.dataIntegrityGrade],
+      ["Official performance valid", report.phase10.officialPerformanceValid ? "YES" : "NO"],
+      ["Aggregate analytical R", report.phase10.aggregateRealizedR],
+      ["Profit factor R", report.phase10.profitFactorR ?? "N/A"],
+      ["Conservative resolved", report.phase10.ambiguityPolicies.CONSERVATIVE.resolved],
+      ["Conservative win rate", report.phase10.ambiguityPolicies.CONSERVATIVE.winRatePercent ?? "N/A"],
+    ]),
+    "",
+    "## Phase 11 professional scalping audit",
+    "",
+    markdownTable([
+      ["System audit score", `${report.phase11.systemScore}/100`],
+      ["System verdict", report.phase11.systemVerdict],
+      ["Live-ready gates passed", report.phase11.liveReady ? "YES" : "NO"],
+      ["Technical A / B / C", `${report.phase11.auditCounts.A} / ${report.phase11.auditCounts.B} / ${report.phase11.auditCounts.C}`],
+      ["Blocked by hard veto", report.phase11.auditCounts.BLOCKED],
+      ["Paper-trade permission", report.phase11.permissionCounts.PAPER_TRADE],
+      ["Overall resolved", report.phase11.overallPerformance.resolved],
+      ["Overall expectancy R", report.phase11.overallPerformance.expectancyR ?? "N/A"],
+      ["Overall profit factor", report.phase11.overallPerformance.profitFactorR ?? "N/A"],
+      ["Maximum drawdown R", report.phase11.overallPerformance.maximumDrawdownR],
+      ["Forward resolved", report.phase11.forwardValidation.forward.resolved],
+      ["Forward expectancy R", report.phase11.forwardValidation.forward.expectancyR ?? "N/A"],
+      ["Forward validation positive", report.phase11.forwardValidation.positive ? "YES" : "NO"],
+    ]),
+    "",
+    "### Phase 11 validation gates",
+    "",
+    ...report.phase11.gates.map((gate) => `- ${gate.passed ? "PASS" : "FAIL"} ${gate.code}: current ${gate.current ?? "N/A"}; required ${gate.required}${gate.requiredForLive ? " (live gate)" : ""}.`),
+    "",
+    "### Strategy-family performance",
+    "",
+    "| Family | Plans | Entered | Resolved | Win rate | Expectancy R | Profit factor | Max DD R |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ...report.phase11.familyPerformance.map((item) => `| ${item.key} | ${item.plans} | ${item.entered} | ${item.resolved} | ${item.winRatePercent ?? "N/A"} | ${item.expectancyR ?? "N/A"} | ${item.profitFactorR ?? "N/A"} | ${item.maximumDrawdownR} |`),
     "",
     "## Family breakdown",
     "",
